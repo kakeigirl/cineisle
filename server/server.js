@@ -1,8 +1,10 @@
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
+const APP_VERSION = "0.4.2-feedback-fix";
 
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
@@ -39,34 +41,103 @@ function ensure(id) {
       currentSubtitle:"", recentSubtitles:[], subtitleUpdatedAt:null,
       latestFrame:null, frameHistory:[], frameUpdatedAt:null, frameSource:"",
       screenshotRequestId:null, screenshotRequestedAt:null,
-      actor:"", observedAt:null
+      actor:"", observedAt:null,
+      playbackDebug:{events:[], range:null, lastError:"", updatedAt:null}
     }
   });
   return rooms.get(id);
 }
-function compactContext(ctx, includeFrameData) {
+function publicBaseUrl(req) {
+  const envUrl = process.env.CINEISLE_PUBLIC_URL || process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "";
+  if (envUrl) return String(envUrl).replace(/\/+$/, "");
+  if (!req) return "";
+  const proto = req.get && (req.get("x-forwarded-proto") || req.protocol || "https");
+  const host = req.get && req.get("host");
+  return host ? `${proto}://${host}` : "";
+}
+function safeText(v, max = 1200) {
+  return String(v || "").replace(/[​-‍﻿]/g, "").trim().slice(0, max);
+}
+function frameSignature(roomId, frameId) {
+  if (!TOKEN) return "";
+  return crypto.createHmac("sha256", TOKEN).update(`${roomId}:${frameId}`).digest("hex").slice(0, 24);
+}
+function hasFrameAccess(req, roomId, frameId) {
+  if (isAuthed(req)) return true;
+  const sig = String((req.query && req.query.sig) || "");
+  return Boolean(TOKEN && sig && sig === frameSignature(roomId, frameId));
+}
+function framePath(r, frame) {
+  if (!r || !frame || !frame.id) return "";
+  const sig = frameSignature(r.id, frame.id);
+  return `/api/rooms/${encodeURIComponent(r.id)}/frames/${encodeURIComponent(frame.id)}.jpg${sig ? `?sig=${sig}` : ""}`;
+}
+function frameUrl(req, r, frame) {
+  const path = framePath(r, frame);
+  const base = publicBaseUrl(req);
+  return base && path ? base + path : path;
+}
+function findFrame(r, frameId) {
+  if (!r || !r.context) return null;
+  const id = String(frameId || "");
+  const frames = [];
+  if (r.context.latestFrame) frames.push(r.context.latestFrame);
+  if (Array.isArray(r.context.frameHistory)) frames.push(...r.context.frameHistory);
+  return frames.find(f => String(f && f.id) === id) || null;
+}
+function cleanPlaybackDebug(input) {
+  const out = { events: [], range: null, lastError: "", updatedAt: now() };
+  if (!input || typeof input !== "object") return out;
+  if (Array.isArray(input.events)) {
+    out.events = input.events.slice(-24).map(e => ({
+      at: safeText(e.at || e.time || "", 80),
+      event: safeText(e.event || e.type || "", 60),
+      position: Number(e.position || e.currentTime || 0),
+      readyState: Number(e.readyState || 0),
+      networkState: Number(e.networkState || 0),
+      message: safeText(e.message || e.detail || "", 240)
+    })).filter(e => e.event);
+  }
+  if (input.range && typeof input.range === "object") {
+    out.range = {
+      checked: Boolean(input.range.checked),
+      ok: input.range.ok === true,
+      status: Number(input.range.status || 0),
+      acceptRanges: safeText(input.range.acceptRanges || "", 80),
+      contentRange: safeText(input.range.contentRange || "", 160),
+      note: safeText(input.range.note || "", 240)
+    };
+  }
+  out.lastError = safeText(input.lastError || "", 500);
+  return out;
+}
+function frameForResponse(req, r, frame, includeData) {
+  if (!frame) return null;
+  const imageUrl = frame.imageUrl || frameUrl(req, r, frame);
+  return {
+    id: frame.id,
+    mime: frame.mime,
+    width: frame.width,
+    height: frame.height,
+    size: frame.size,
+    source: frame.source || (r && r.context && r.context.frameSource) || "",
+    note: frame.note || "",
+    uploadedAt: frame.uploadedAt || (r && r.context && r.context.frameUpdatedAt) || null,
+    imageUrl,
+    image_url: imageUrl,
+    url: imageUrl,
+    path: framePath(r, frame),
+    ocrText: frame.ocrText || "",
+    extractedText: frame.extractedText || frame.ocrText || "",
+    fallbackText: frame.fallbackText || "",
+    dataUrl: includeData ? frame.dataUrl : undefined
+  };
+}
+function compactContext(ctx, includeFrameData, req, roomId) {
   ctx = ctx || {};
-  const latestFrame = ctx.latestFrame ? {
-    id: ctx.latestFrame.id,
-    mime: ctx.latestFrame.mime,
-    width: ctx.latestFrame.width,
-    height: ctx.latestFrame.height,
-    size: ctx.latestFrame.size,
-    source: ctx.latestFrame.source || ctx.frameSource || "",
-    note: ctx.latestFrame.note || "",
-    uploadedAt: ctx.latestFrame.uploadedAt || ctx.frameUpdatedAt || null,
-    dataUrl: includeFrameData ? ctx.latestFrame.dataUrl : undefined
-  } : null;
-  const recentFrames = Array.isArray(ctx.frameHistory) ? ctx.frameHistory.slice(-5).map(f => ({
-    id: f.id,
-    mime: f.mime,
-    width: f.width,
-    height: f.height,
-    size: f.size,
-    source: f.source || "",
-    note: f.note || "",
-    uploadedAt: f.uploadedAt || null
-  })) : [];
+  const fakeRoom = roomId ? { id: roomId, context: ctx } : { id: "", context: ctx };
+  const latestFrame = frameForResponse(req, fakeRoom, ctx.latestFrame, includeFrameData);
+  const recentFrames = Array.isArray(ctx.frameHistory) ? ctx.frameHistory.slice(-5).map(f => frameForResponse(req, fakeRoom, f, false)) : [];
   return {
     currentSubtitle: ctx.currentSubtitle || "",
     recentSubtitles: Array.isArray(ctx.recentSubtitles) ? ctx.recentSubtitles.slice(-8) : [],
@@ -77,12 +148,13 @@ function compactContext(ctx, includeFrameData) {
     frameSource: ctx.frameSource || "",
     screenshotRequestId: ctx.screenshotRequestId || null,
     screenshotRequestedAt: ctx.screenshotRequestedAt || null,
+    playbackDebug: ctx.playbackDebug || { events: [], range: null, lastError: "", updatedAt: null },
     recentFrames,
     latestFrame
   };
 }
-function pub(r){
-  return {...r, messages:r.messages.slice(-80), notes:r.notes.slice(-80), context: compactContext(r.context, false)};
+function pub(r, req){
+  return {...r, messages:r.messages.slice(-80), notes:r.notes.slice(-80), context: compactContext(r.context, false, req, r.id)};
 }
 function getTokenFromReq(req) {
   return (req.headers.authorization || "").replace(/^Bearer\s+/i,"")
@@ -106,8 +178,8 @@ function auth(req,res,next){
 }
 
 app.get("/", (req,res)=>res.sendFile(__dirname + "/public/index.html"));
-app.get("/server-info", (req,res)=>res.json({ok:true, app:"CineIsle Server", version:"0.4.1-render-fix", rooms:rooms.size, tokenRequired:Boolean(TOKEN), mcp:"/mcp", health:"/api/health", time:now()}));
-app.get("/api/health",(req,res)=>res.json({ok:true, app:"CineIsle Server", version:"0.4.1-render-fix", rooms:rooms.size, tokenRequired:Boolean(TOKEN), time:now()}));
+app.get("/server-info", (req,res)=>res.json({ok:true, app:"CineIsle Server", version:APP_VERSION, rooms:rooms.size, tokenRequired:Boolean(TOKEN), mcp:"/mcp", health:"/api/health", time:now()}));
+app.get("/api/health",(req,res)=>res.json({ok:true, app:"CineIsle Server", version:APP_VERSION, rooms:rooms.size, tokenRequired:Boolean(TOKEN), time:now()}));
 
 app.post("/api/rooms",(req,res)=>{
   const r = ensure(code());
@@ -117,19 +189,19 @@ app.post("/api/rooms",(req,res)=>{
   r.partner = req.body.partner || r.partner;
   r.mood = req.body.mood || r.mood;
   r.inviteNote = req.body.inviteNote || r.inviteNote;
-  res.json({ok:true, room: pub(r)});
+  res.json({ok:true, room: pub(r, req)});
 });
 app.get("/api/rooms/:id",(req,res)=>{
   const r = rooms.get(String(req.params.id).toUpperCase());
   if (!r) return res.status(404).json({ok:false,error:"ROOM_NOT_FOUND"});
-  res.json({ok:true, room: pub(r)});
+  res.json({ok:true, room: pub(r, req)});
 });
 app.post("/api/rooms/:id/message", auth, (req,res)=>{
   const r = ensure(req.params.id);
   applyAssistantName(r, req.body);
   const m = { id:Date.now()+"", name:req.body.name || "观影人", text:String(req.body.text || "").slice(0,500), at:now() };
   r.messages.push(m); r.updatedAt = now();
-  res.json({ok:true, message:m, room:pub(r)});
+  res.json({ok:true, message:m, room:pub(r, req)});
 });
 app.post("/api/rooms/:id/playback", auth, (req,res)=>{
   const r = ensure(req.params.id);
@@ -143,15 +215,19 @@ app.post("/api/rooms/:id/playback", auth, (req,res)=>{
   if (req.body.mood) r.mood = String(req.body.mood).slice(0,80);
   if (req.body.inviteNote) r.inviteNote = String(req.body.inviteNote).slice(0,240);
   r.lastActor = req.body.actor || req.body.name || "观影人";
+  if (req.body.playbackDebug) {
+    r.context = r.context || {};
+    r.context.playbackDebug = cleanPlaybackDebug(req.body.playbackDebug);
+  }
   r.updatedAt = now();
-  res.json({ok:true, room:pub(r)});
+  res.json({ok:true, room:pub(r, req)});
 });
 app.post("/api/rooms/:id/note", auth, (req,res)=>{
   const r = ensure(req.params.id);
   applyAssistantName(r, req.body);
   const n = { id:Date.now()+"", name:req.body.name || "观影人", text:String(req.body.text || "").slice(0,800), type:req.body.type || "note", time:req.body.time || r.currentTime, at:now() };
   r.notes.push(n); r.updatedAt = now();
-  res.json({ok:true, note:n, room:pub(r)});
+  res.json({ok:true, note:n, room:pub(r, req)});
 });
 app.post("/api/rooms/:id/card", auth, (req,res)=>{
   const r = ensure(req.params.id);
@@ -172,7 +248,7 @@ app.post("/api/rooms/:id/card", auth, (req,res)=>{
     generatedAt:now()
   };
   r.updatedAt = now();
-  res.json({ok:true, card:r.card, room:pub(r)});
+  res.json({ok:true, card:r.card, room:pub(r, req)});
 });
 
 app.post("/api/rooms/:id/context", auth, (req,res)=>{
@@ -195,9 +271,10 @@ app.post("/api/rooms/:id/context", auth, (req,res)=>{
   ctx.actor = String(req.body.actor || req.body.name || "观影人").slice(0,80);
   ctx.observedAt = req.body.observedAt || now();
   ctx.subtitleUpdatedAt = now();
+  if (req.body.playbackDebug) ctx.playbackDebug = cleanPlaybackDebug(req.body.playbackDebug);
   r.lastActor = ctx.actor;
   r.updatedAt = now();
-  res.json({ok:true, context: compactContext(ctx, false), room: pub(r)});
+  res.json({ok:true, context: compactContext(ctx, false, req, r.id), room: pub(r, req)});
 });
 
 app.post("/api/rooms/:id/screenshot", auth, (req,res)=>{
@@ -208,8 +285,17 @@ app.post("/api/rooms/:id/screenshot", auth, (req,res)=>{
   if (!raw) return res.status(400).json({ok:false,error:"IMAGE_REQUIRED"});
   const dataUrl = raw.startsWith("data:") ? raw : `data:${req.body.mime || "image/jpeg"};base64,${raw}`;
   if (dataUrl.length > 5_500_000) return res.status(413).json({ok:false,error:"IMAGE_TOO_LARGE"});
+  const frameId = Date.now()+"";
+  const ocrText = safeText(req.body.ocrText || req.body.extractedText || req.body.screenshotText || "", 3000);
+  const recentSubtitles = Array.isArray(ctx.recentSubtitles) ? ctx.recentSubtitles.slice(-5).join("\n") : "";
+  const fallbackText = safeText([
+    ocrText ? `截图文字：${ocrText}` : "",
+    ctx.currentSubtitle ? `当前字幕：${ctx.currentSubtitle}` : "",
+    recentSubtitles ? `最近字幕：\n${recentSubtitles}` : "",
+    req.body.note ? `上传备注：${req.body.note}` : ""
+  ].filter(Boolean).join("\n\n"), 4000);
   ctx.latestFrame = {
-    id: Date.now()+"",
+    id: frameId,
     dataUrl,
     mime: String(req.body.mime || (dataUrl.match(/^data:([^;]+)/)||[])[1] || "image/jpeg").slice(0,50),
     width: Number(req.body.width || 0),
@@ -217,8 +303,13 @@ app.post("/api/rooms/:id/screenshot", auth, (req,res)=>{
     size: dataUrl.length,
     source: String(req.body.source || "accessibility").slice(0,80),
     note: String(req.body.note || "").slice(0,240),
+    ocrText,
+    extractedText: ocrText,
+    fallbackText,
     uploadedAt: now()
   };
+  ctx.latestFrame.imageUrl = frameUrl(req, r, ctx.latestFrame);
+  ctx.latestFrame.image_url = ctx.latestFrame.imageUrl;
   ctx.frameUpdatedAt = ctx.latestFrame.uploadedAt;
   ctx.frameSource = ctx.latestFrame.source;
   ctx.frameHistory = Array.isArray(ctx.frameHistory) ? ctx.frameHistory : [];
@@ -229,7 +320,7 @@ app.post("/api/rooms/:id/screenshot", auth, (req,res)=>{
   ctx.actor = String(req.body.actor || req.body.name || ctx.actor || "观影人").slice(0,80);
   ctx.observedAt = now();
   r.updatedAt = now();
-  res.json({ok:true, frame: compactContext(ctx, false).latestFrame, room: pub(r)});
+  res.json({ok:true, frame: compactContext(ctx, false, req, r.id).latestFrame, ocrText, fallbackText, room: pub(r, req)});
 });
 
 app.post("/api/rooms/:id/screenshot-request", auth, (req,res)=>{
@@ -242,7 +333,7 @@ app.post("/api/rooms/:id/screenshot-request", auth, (req,res)=>{
   applyAssistantName(r, req.body);
   r.context.actor = req.body.actor || req.body.name || defaultAssistant(r);
   r.updatedAt = now();
-  res.json({ok:true, requestId, requestedAt:r.context.screenshotRequestedAt, room:pub(r)});
+  res.json({ok:true, requestId, requestedAt:r.context.screenshotRequestedAt, room:pub(r, req)});
 });
 app.get("/api/rooms/:id/screenshot-request", auth, (req,res)=>{
   const r = rooms.get(String(req.params.id).toUpperCase());
@@ -261,21 +352,36 @@ app.get("/api/rooms/:id/context", auth, (req,res)=>{
   const r = rooms.get(String(req.params.id).toUpperCase());
   if (!r) return res.status(404).json({ok:false,error:"ROOM_NOT_FOUND"});
   const includeFrame = String(req.query.includeFrame || req.query.includeScreenshot || "") === "1";
-  res.json({ok:true, room: pub(r), context: compactContext(r.context, includeFrame)});
+  res.json({ok:true, room: pub(r, req), context: compactContext(r.context, includeFrame, req, r.id)});
 });
 
-app.get("/api/rooms/:id/latest-frame.jpg", auth, (req,res)=>{
+app.get("/api/rooms/:id/playback-debug", auth, (req,res)=>{
   const r = rooms.get(String(req.params.id).toUpperCase());
-  if (!r || !r.context || !r.context.latestFrame || !r.context.latestFrame.dataUrl) {
-    return res.status(404).json({ok:false,error:"FRAME_NOT_FOUND"});
-  }
-  const frame = r.context.latestFrame;
+  if (!r) return res.status(404).json({ok:false,error:"ROOM_NOT_FOUND"});
+  res.json({ok:true, playbackDebug: (r.context && r.context.playbackDebug) || {events:[], range:null, lastError:"", updatedAt:null}});
+});
+
+function sendFrameImage(req, res, r, frame) {
+  if (!r || !frame || !frame.dataUrl) return res.status(404).json({ok:false,error:"FRAME_NOT_FOUND"});
+  if (!hasFrameAccess(req, r.id, frame.id)) return res.status(403).json({ok:false,error:"CINEISLE_BAD_TOKEN"});
   const m = String(frame.dataUrl).match(/^data:([^;]+);base64,(.*)$/);
   if (!m) return res.status(500).json({ok:false,error:"BAD_FRAME_DATA"});
   const buf = Buffer.from(m[2], "base64");
   res.setHeader("Content-Type", m[1] || frame.mime || "image/jpeg");
   res.setHeader("Cache-Control", "no-store");
   res.send(buf);
+}
+
+app.get("/api/rooms/:id/latest-frame.jpg", (req,res)=>{
+  const r = rooms.get(String(req.params.id).toUpperCase());
+  const frame = r && r.context && r.context.latestFrame;
+  return sendFrameImage(req, res, r, frame);
+});
+
+app.get("/api/rooms/:id/frames/:frameId.jpg", (req,res)=>{
+  const r = rooms.get(String(req.params.id).toUpperCase());
+  const frame = findFrame(r, req.params.frameId);
+  return sendFrameImage(req, res, r, frame);
 });
 
 
@@ -368,7 +474,30 @@ function mcpTools() {
         type: "object",
         properties: {
           room: { type: "string", description: "房间号" },
-          includeScreenshot: { type: "boolean", description: "是否在结果中包含最近一张截图的 dataUrl。截图可能较大，默认 false" }
+          includeScreenshot: { type: "boolean", description: "是否额外包含最近一张截图的 dataUrl；默认返回 image_url 与 OCR/兜底文本，dataUrl 可不传" }
+        },
+        required: ["room"]
+      }
+    },
+
+    {
+      name: "get_screenshot_text",
+      description: "读取最近一张映屿截图的可访问 image_url、OCR/兜底文本和元数据；用于模型无法直接看 MCP 图片时仍能理解画面",
+      inputSchema: {
+        type: "object",
+        properties: {
+          room: { type: "string", description: "房间号" }
+        },
+        required: ["room"]
+      }
+    },
+    {
+      name: "get_playback_debug",
+      description: "读取最近播放器事件、卡顿/错误和 Range 检测信息，用于排查播放十秒后卡住等问题",
+      inputSchema: {
+        type: "object",
+        properties: {
+          room: { type: "string", description: "房间号" }
         },
         required: ["room"]
       }
@@ -440,7 +569,7 @@ function mcpPayload(obj) {
   return out;
 }
 
-function callCinemaTool(name, args) {
+function callCinemaTool(name, args, req) {
   args = args || {};
 
   if (name === "create_room") {
@@ -451,13 +580,13 @@ function callCinemaTool(name, args) {
     r.partner = args.partner || r.partner;
     r.mood = args.mood || r.mood;
     r.inviteNote = args.inviteNote || r.inviteNote;
-    return pub(r);
+    return pub(r, req);
   }
 
   if (name === "get_room_state") {
     const r = rooms.get(String(args.room || args.room_id || "").toUpperCase());
     if (!r) throw new Error("ROOM_NOT_FOUND");
-    return pub(r);
+    return pub(r, req);
   }
 
   if (name === "send_room_message") {
@@ -471,7 +600,7 @@ function callCinemaTool(name, args) {
     };
     r.messages.push(m);
     r.updatedAt = now();
-    return { message: m, room: pub(r) };
+    return { message: m, room: pub(r, req) };
   }
 
   if (name === "control_playback") {
@@ -484,7 +613,7 @@ function callCinemaTool(name, args) {
     applyAssistantName(r, args);
     r.lastActor = args.actor || defaultAssistant(r);
     r.updatedAt = now();
-    return pub(r);
+    return pub(r, req);
   }
 
   if (name === "add_note") {
@@ -499,7 +628,7 @@ function callCinemaTool(name, args) {
     };
     r.notes.push(n);
     r.updatedAt = now();
-    return { note: n, room: pub(r) };
+    return { note: n, room: pub(r, req) };
   }
 
   if (name === "request_screenshot") {
@@ -512,13 +641,42 @@ function callCinemaTool(name, args) {
     applyAssistantName(r, args);
     r.context.actor = args.actor || defaultAssistant(r);
     r.updatedAt = now();
-    return { ok:true, requestId, requestedAt:r.context.screenshotRequestedAt, room:pub(r) };
+    return { ok:true, requestId, requestedAt:r.context.screenshotRequestedAt, room:pub(r, req) };
   }
 
   if (name === "get_viewing_context") {
     const r = rooms.get(String(args.room || args.room_id || "").toUpperCase());
     if (!r) throw new Error("ROOM_NOT_FOUND");
-    return { room: pub(r), context: compactContext(r.context, Boolean(args.includeScreenshot)) };
+    const context = compactContext(r.context, Boolean(args.includeScreenshot), req, r.id);
+    const latest = context.latestFrame;
+    return {
+      room: pub(r, req),
+      context,
+      images: latest ? [latest] : [],
+      ocr_results: latest ? [{ frameId: latest.id, text: latest.ocrText || latest.fallbackText || "", imageUrl: latest.imageUrl }] : [],
+      model_note: latest ? "如果 MCP 图片被平台转换为 mcp_img 占位符，请优先使用 imageUrl；若仍无法读取图片，请使用 ocr_results / fallbackText。" : "暂无截图。"
+    };
+  }
+
+  if (name === "get_screenshot_text") {
+    const r = rooms.get(String(args.room || args.room_id || "").toUpperCase());
+    if (!r) throw new Error("ROOM_NOT_FOUND");
+    const context = compactContext(r.context, false, req, r.id);
+    const latest = context.latestFrame;
+    return {
+      ok: true,
+      room: r.id,
+      latestFrame: latest,
+      images: latest ? [latest] : [],
+      ocr_results: latest ? [{ frameId: latest.id, text: latest.ocrText || latest.fallbackText || "", imageUrl: latest.imageUrl }] : [],
+      text: latest ? (latest.ocrText || latest.fallbackText || "已收到截图，但没有 OCR 文本；请使用 imageUrl 查看原图。") : "暂无截图。"
+    };
+  }
+
+  if (name === "get_playback_debug") {
+    const r = rooms.get(String(args.room || args.room_id || "").toUpperCase());
+    if (!r) throw new Error("ROOM_NOT_FOUND");
+    return { ok: true, room: r.id, playbackDebug: (r.context && r.context.playbackDebug) || {events:[], range:null,lastError:"",updatedAt:null} };
   }
 
   if (name === "generate_card") {
@@ -540,7 +698,7 @@ function callCinemaTool(name, args) {
       generatedAt: now()
     };
     r.updatedAt = now();
-    return { card: r.card, room: pub(r) };
+    return { card: r.card, room: pub(r, req) };
   }
 
   throw new Error("UNKNOWN_TOOL: " + name);
@@ -569,7 +727,7 @@ function handleMcpMessage(req, msg) {
       capabilities: { tools: {} },
       serverInfo: {
         name: "映屿 CineIsle · Viewing Context",
-        version: "0.4.0-pwa"
+        version: APP_VERSION
       }
     });
   }
@@ -583,7 +741,7 @@ function handleMcpMessage(req, msg) {
     const toolName = params.name;
     const toolArgs = params.arguments || {};
     try {
-      const result = callCinemaTool(toolName, toolArgs);
+      const result = callCinemaTool(toolName, toolArgs, req);
       return rpcResult(id, mcpPayload(result));
     } catch (e) {
       return rpcError(id, -32000, e.message);
@@ -591,10 +749,10 @@ function handleMcpMessage(req, msg) {
   }
 
   // 兼容旧写法：直接 method=create_room / send_room_message
-  if (["create_room", "get_room_state", "send_room_message", "control_playback", "add_note", "generate_card", "get_viewing_context", "request_screenshot"].includes(method)) {
+  if (["create_room", "get_room_state", "send_room_message", "control_playback", "add_note", "generate_card", "get_viewing_context", "request_screenshot", "get_screenshot_text", "get_playback_debug"].includes(method)) {
     if (!isAuthed(req)) return rpcError(id || 1, -32001, "CINEISLE_BAD_TOKEN");
     try {
-      const result = callCinemaTool(method, args);
+      const result = callCinemaTool(method, args, req);
       return id ? rpcResult(id, mcpPayload(result)) : { ok: true, result };
     } catch (e) {
       return id ? rpcError(id, -32000, e.message) : { ok: false, error: e.message };

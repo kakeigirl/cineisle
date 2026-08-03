@@ -68,6 +68,7 @@ public class MainActivity extends Activity {
     private int fullscreenExitRestoreMs = -1;
     private boolean fullscreenExitWasPlaying = false;
     private long fullscreenExitAt = 0L;
+    private String lastPlaybackIssue = "";
     private final ArrayList<SubtitleCue> subtitleCues = new ArrayList<>();
     private final ArrayList<MovieItem> movieLibrary = new ArrayList<>();
 
@@ -823,6 +824,19 @@ private final Runnable poller = new Runnable() {
             sendCinemaContext(true);
         });
         video.setOnCompletionListener(mp -> sendPlayback(true));
+        video.setOnErrorListener((mp, what, extra) -> {
+            lastPlaybackIssue = "VideoView error what=" + what + " extra=" + extra;
+            toast("播放异常：" + lastPlaybackIssue);
+            sendPlayback(true);
+            return false;
+        });
+        video.setOnInfoListener((mp, what, extra) -> {
+            if (what == android.media.MediaPlayer.MEDIA_INFO_BUFFERING_START) lastPlaybackIssue = "buffering_start";
+            else if (what == android.media.MediaPlayer.MEDIA_INFO_BUFFERING_END) lastPlaybackIssue = "buffering_end";
+            else if (what == android.media.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) lastPlaybackIssue = "rendering_start";
+            if (lastPlaybackIssue.length() > 0) sendPlayback(false);
+            return false;
+        });
         video.setOnClickListener(v -> sendPlayback(false));
 
         handler.postDelayed(new Runnable() {
@@ -1660,25 +1674,62 @@ private final Runnable poller = new Runnable() {
         while((n = in.read(buf)) > 0) bos.write(buf, 0, n);
         in.close();
         byte[] data = bos.toByteArray();
-        String text;
-        if (data.length >= 3 && (data[0] & 0xff) == 0xef && (data[1] & 0xff) == 0xbb && (data[2] & 0xff) == 0xbf) {
-            text = new String(data, 3, data.length - 3, "UTF-8");
-        } else if (data.length >= 2 && (data[0] & 0xff) == 0xff && (data[1] & 0xff) == 0xfe) {
-            text = new String(data, 2, data.length - 2, "UTF-16LE");
-        } else if (data.length >= 2 && (data[0] & 0xff) == 0xfe && (data[1] & 0xff) == 0xff) {
-            text = new String(data, 2, data.length - 2, "UTF-16BE");
-        } else {
-            text = new String(data, "UTF-8");
-            ArrayList<SubtitleCue> utf8Probe = parseSubtitleText(text);
-            if (utf8Probe.size() == 0 && text.indexOf('�') >= 0) {
-                try {
-                    String gb = new String(data, "GB18030");
-                    if (parseSubtitleText(gb).size() > 0 || gb.indexOf('�') < text.indexOf('�')) text = gb;
-                } catch(Exception ignored) {}
-            }
+        if (data.length == 0) return "";
+
+        ArrayList<String[]> candidates = new ArrayList<>();
+        addSubtitleDecodeCandidate(candidates, data, "UTF-8", startsWith(data, 0xef, 0xbb, 0xbf) ? 3 : 0);
+        addSubtitleDecodeCandidate(candidates, data, "GB18030", 0);
+        addSubtitleDecodeCandidate(candidates, data, "UTF-16LE", startsWith(data, 0xff, 0xfe) ? 2 : 0);
+        addSubtitleDecodeCandidate(candidates, data, "UTF-16BE", startsWith(data, 0xfe, 0xff) ? 2 : 0);
+        if (candidates.size() == 0) throw new IOException("编码读取失败");
+        Collections.sort(candidates, (a,b) -> Integer.compare(Integer.parseInt(b[0]), Integer.parseInt(a[0])));
+        return candidates.get(0)[2];
+    }
+
+    private boolean startsWith(byte[] data, int... values) {
+        if (data == null || data.length < values.length) return false;
+        for (int i=0; i<values.length; i++) if ((data[i] & 0xff) != values[i]) return false;
+        return true;
+    }
+
+    private void addSubtitleDecodeCandidate(ArrayList<String[]> out, byte[] data, String charset, int offset) {
+        try {
+            if (offset < 0 || offset >= data.length) offset = 0;
+            String text = new String(data, offset, data.length - offset, charset);
+            text = normalizeSubtitleText(text);
+            int score = parseSubtitleText(text).size() * 1000 + countTimelineLines(text) * 20 + countCjk(text) - countReplacement(text) * 30;
+            out.add(new String[]{String.valueOf(score), charset, text});
+        } catch(Exception ignored) {}
+    }
+
+    private String normalizeSubtitleText(String text) {
+        if (text == null) return "";
+        return text.replace("\ufeff", "")
+                .replace("\u200B", "")
+                .replace("\u200C", "")
+                .replace("\u200D", "")
+                .replace('\u00a0', ' ')
+                .replace("\r\n", "\n")
+                .replace('\r', '\n');
+    }
+
+    private int countTimelineLines(String text) {
+        int c = 0;
+        for (String line: normalizeSubtitleText(text).split("\n")) if (line.contains("-->")) c++;
+        return c;
+    }
+    private int countReplacement(String text) {
+        int c = 0;
+        for (int i=0; i<text.length(); i++) if (text.charAt(i) == '\ufffd') c++;
+        return c;
+    }
+    private int countCjk(String text) {
+        int c = 0;
+        for (int i=0; i<text.length(); i++) {
+            char ch = text.charAt(i);
+            if (ch >= '\u4e00' && ch <= '\u9fff') c++;
         }
-        if (text.length() > 0 && text.charAt(0) == '\ufeff') text = text.substring(1);
-        return text;
+        return c;
     }
 
     private String detectSubtitleFormat(String name, String text) {
@@ -1693,13 +1744,14 @@ private final Runnable poller = new Runnable() {
         String lower = name == null ? "" : name.toLowerCase(Locale.US);
         if (lower.endsWith(".rar") || lower.endsWith(".zip") || lower.endsWith(".7z")) return "这是压缩包，请先解压出 .srt/.vtt/.ass";
         if ("ASS/SSA".equals(detected)) return "已识别 ASS，但没有 Dialogue 台词，可能文件损坏或不是字幕";
-        if ("未知格式".equals(detected)) return "不是标准 SRT/VTT/ASS，换一个字幕文件试试";
-        return "时间轴或正文为空，可能编码异常或字幕文件不匹配";
+        if ("未知格式".equals(detected)) return "已读到文本但未匹配时间轴，可能不是标准 SRT/VTT/ASS";
+        return "匹配到时间轴但正文为空，可能字幕结构不规范、编码异常或隐藏字符干扰";
     }
 
     private ArrayList<SubtitleCue> parseSubtitleText(String raw) {
         ArrayList<SubtitleCue> cues = new ArrayList<>();
         if (raw == null) return cues;
+        raw = normalizeSubtitleText(raw);
         String trimmed = raw.trim();
         if (trimmed.contains("[Events]") && trimmed.contains("Dialogue:")) {
             cues.addAll(parseAssSubtitleText(raw));
@@ -1712,28 +1764,34 @@ private final Runnable poller = new Runnable() {
     private ArrayList<SubtitleCue> parseSrtVttSubtitleText(String raw) {
         ArrayList<SubtitleCue> cues = new ArrayList<>();
         if (raw == null) return cues;
-        String text = raw.replace("\r", "").replace("WEBVTT", "");
-        String[] blocks = text.split("\\n\\s*\\n");
-        for (String block: blocks) {
-            String[] lines = block.trim().split("\n");
-            if (lines.length == 0) continue;
-            int timeIdx = -1;
-            for (int i=0; i<lines.length; i++) {
-                if (lines[i].contains("-->")) { timeIdx = i; break; }
-            }
-            if (timeIdx < 0) continue;
-            String[] parts = lines[timeIdx].split("-->");
+        String text = normalizeSubtitleText(raw).replaceFirst("(?i)^WEBVTT[^\n]*(\n|$)", "");
+        String[] lines = text.split("\n");
+        for (int i=0; i<lines.length; i++) {
+            String timeLine = lines[i] == null ? "" : lines[i].trim();
+            if (!timeLine.contains("-->")) continue;
+            String[] parts = timeLine.split("-->", 2);
             if (parts.length < 2) continue;
             double start = parseSubtitleTime(parts[0]);
-            double end = parseSubtitleTime(parts[1].split("\\s+")[0]);
+            String right = parts[1].trim().split("\\s+")[0];
+            double end = parseSubtitleTime(right);
+            if (!(end > start)) continue;
             StringBuilder sb = new StringBuilder();
-            for (int i=timeIdx+1; i<lines.length; i++) {
-                String line = cleanSubtitleLine(lines[i]);
-                if (line.length() == 0 || line.startsWith("NOTE")) continue;
+            for (int j=i+1; j<lines.length; j++) {
+                String line = lines[j] == null ? "" : lines[j].trim();
+                String next = (j + 1 < lines.length && lines[j+1] != null) ? lines[j+1] : "";
+                if (line.contains("-->")) break;
+                if (line.length() == 0) {
+                    if (sb.length() > 0) break;
+                    continue;
+                }
+                if (line.matches("^\\d+$") && next.contains("-->")) break;
+                if (line.matches("(?i)^(NOTE|STYLE|REGION)(\\s|$).*")) continue;
+                line = cleanSubtitleLine(line);
+                if (line.length() == 0) continue;
                 if (sb.length() > 0) sb.append(" / ");
                 sb.append(line);
             }
-            if (end > start && sb.length() > 0) cues.add(new SubtitleCue(start, end, sb.toString()));
+            if (sb.length() > 0) cues.add(new SubtitleCue(start, end, sb.toString()));
         }
         return cues;
     }
@@ -1877,6 +1935,7 @@ private final Runnable poller = new Runnable() {
                 body.put("currentSubtitle", cur);
                 body.put("recentSubtitles", recentSubtitleArray(sec));
                 body.put("observedAt", new Date().toString());
+                body.put("playbackDebug", playbackDebugPayload());
                 postJson("/api/rooms/" + roomId + "/context", body, true);
             } catch(Exception ignored) {}
         }).start();
@@ -1947,9 +2006,32 @@ private final Runnable poller = new Runnable() {
                 body.put("partner", invitePartner);
                 body.put("mood", inviteMood);
                 body.put("inviteNote", inviteNote);
+                body.put("playbackDebug", playbackDebugPayload());
                 postJson("/api/rooms/" + roomId + "/playback", body, true);
             } catch(Exception ignored) {}
         }).start();
+    }
+
+
+    private JSONObject playbackDebugPayload() throws JSONException {
+        JSONObject dbg = new JSONObject();
+        JSONArray events = new JSONArray();
+        JSONObject e = new JSONObject();
+        e.put("at", new Date().toString());
+        e.put("event", lastPlaybackIssue.length() > 0 ? lastPlaybackIssue : "android-videoview-status");
+        e.put("position", video == null ? 0 : video.getCurrentPosition()/1000.0);
+        e.put("readyState", 0);
+        e.put("networkState", 0);
+        e.put("message", "Android VideoView；本地文件播放不走 HTTP Range，远程片源卡顿请检查代理 206/Accept-Ranges");
+        events.put(e);
+        dbg.put("events", events);
+        JSONObject range = new JSONObject();
+        range.put("checked", true);
+        range.put("ok", true);
+        range.put("note", "Android 本地文件/Content URI 播放，不需要 HTTP Range；若使用远程代理片源，服务端仍需支持 206 Partial Content。");
+        dbg.put("range", range);
+        dbg.put("lastError", lastPlaybackIssue);
+        return dbg;
     }
 
     private void sendPlayback(boolean force) {
@@ -1971,6 +2053,7 @@ private final Runnable poller = new Runnable() {
                 body.put("partner", invitePartner);
                 body.put("mood", inviteMood);
                 body.put("inviteNote", inviteNote);
+                body.put("playbackDebug", playbackDebugPayload());
                 postJson("/api/rooms/" + roomId + "/playback", body, true);
             } catch(Exception ignored) {}
         }).start();

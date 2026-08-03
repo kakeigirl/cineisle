@@ -12,15 +12,14 @@
 
 公开版支持在设置里填写 **AI 名字**。填写后，App / PWA 内和 MCP 截图请求会同步这个名字，例如「给小G看一眼」「给林澈看一眼」。
 
-## 本次更新：v0.4.1 Render 部署修复 + PWA + Android APK
+## 本次更新：v0.4.2 用户反馈修复版
 
-- 新增 **iOS Web/PWA 入口**：iPhone 用 Safari 打开后端地址，添加到主屏幕即可像 App 一样使用。
-- Android 仍保留原生 App 与 GitHub Actions 自动打包 APK。
-- 新增 PWA 文件：`server/public/index.html`、`app.css`、`app.js`、`manifest.webmanifest`、`sw.js`、图标。
-- PWA 支持创建/加入房间、本地导入影片、播放/暂停/进度同步、聊天、弹幕、字幕导入、时间轴笔记、观影卡片、本机影厅记录、手动上传当前视频帧给 AI 看一眼。
-- 新增 GitHub Actions：源码 ZIP 打包、上传 ZIP 后解压覆盖旧仓库。
-- README 更新：保留 Render 一键部署、局域网部署、Android APK、MCP 工具教程，并补充 iOS PWA 使用说明。
-- 修复 Render 一键部署稳定性：移除带内部源地址的 `package-lock.json`，强制使用 npm 官方 registry，并在构建阶段检查 `express` / `cors` 是否安装成功。
+- 修复 **MCP 截图通道可见性**：截图上传后会生成可访问的 `image_url`，MCP 返回里同时保留图片元数据、`image_url`、`ocrText / fallbackText`，避免模型只拿到 `mcp_img_xxx.jpg` 占位符却看不到真实像素。
+- 新增 MCP 工具：`get_screenshot_text` 用于读取最近截图的图片地址与文本兜底；`get_playback_debug` 用于读取播放器事件、卡顿、错误和 Range 检测信息。
+- 优化 **SRT/VTT/ASS 字幕导入**：PWA 与 Android 均增强 UTF-8、UTF-8 BOM、GB18030、UTF-16LE/BE、CRLF 换行、零宽字符、逗号毫秒时间轴等兼容；导入 0 条时给出更具体原因。
+- 优化 **播放十秒后卡住排查**：PWA 记录 `loadedmetadata / canplay / waiting / stalled / error / timeupdate / progress` 等事件，同步到后端；远程同步增加保护，避免用户刚播放就被旧房间状态回拉。
+- 增加 Range 诊断：PWA 会对 HTTP(S) 片源尝试 `Range: bytes=0-1` 检测；本地文件会标记为“不需要 Range”。如果远程片源/代理不支持 206 Partial Content，调试信息会提示。
+- 版本更新：后端 `0.4.2-feedback-fix`，Android `versionName 0.4.2 / versionCode 12`。
 
 ## 功能
 
@@ -35,11 +34,18 @@
 - 金句摘录：手动记录台词/高光瞬间
 - 三套观影卡片模板：电影票根、片尾回执、观影明信片
 - 档案馆/影厅：保存本机导入过的影片信息和上次进度
-- 字幕感知：支持导入 `.srt` / `.vtt` / `.ass` / `.ssa` 字幕，按播放进度同步当前字幕与最近字幕
+- 字幕感知：支持导入 `.srt` / `.vtt` / `.ass` / `.ssa` 字幕，按播放进度同步当前字幕与最近字幕；增强中文编码、逗号毫秒、CRLF 换行和隐藏字符兼容
 - ASS/SSA 字幕兼容：会尽量去掉样式标签和绘图代码，只保留台词
 - 低频画面截图：Android App 开启无障碍服务后可低频上传；PWA 可手动截取当前本地视频帧上传
 - 最近画面时间线：后端保留最近 5 张截图摘要，方便 AI 理解刚刚发生了什么
-- MCP 接口：让 ChatGPT / 其他支持 MCP 的 AI 读房间、发弹幕、控制播放、请求截图、读取观影上下文、生成卡片
+- MCP 接口：让 ChatGPT / 其他支持 MCP 的 AI 读房间、发弹幕、控制播放、请求截图、读取观影上下文、生成卡片；截图返回 `image_url` 与文本兜底，播放问题可读调试信息
+
+
+### 用户反馈排查说明
+
+- **截图通过 MCP 后模型看不到图**：优先查看 MCP 返回里的 `image_url`。若当前平台仍无法让模型读取图片，请直接把截图发到对话里作为临时绕过；后端会保留最近 5 张截图元数据。
+- **字幕导入 0 条**：先确认文件不是压缩包；映屿会自动尝试 UTF-8 / GB18030 / UTF-16 等编码。若仍失败，请反馈原字幕样本和导入提示。
+- **播放十秒后卡住**：优先换普通 MP4 / 换网络测试。若是远程链接或代理片源，需要检查是否支持 `Accept-Ranges` 与 `206 Partial Content`。房间的 `get_playback_debug` 可读取最近播放器事件。
 
 ## 文件结构
 
@@ -488,7 +494,7 @@ https://cineisle-server.onrender.com/mcp?token=change-me
 当前公开版：
 
 ```text
-CineIsle Public v0.4.0 PWA
+CineIsle Public v0.4.2 用户反馈修复版
 ```
 
 公开版已移除私人称呼和私密标识，适合开源、自部署和二次定制。

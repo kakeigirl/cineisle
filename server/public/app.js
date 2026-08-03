@@ -16,7 +16,13 @@
     subtitles: [],
     danmakuOn: true,
     seenMessages: new Set(),
-    hall: []
+    hall: [],
+    playbackEvents: [],
+    playbackRange: null,
+    lastPlaybackError: "",
+    lastLocalPlaybackActionAt: 0,
+    lastTimeupdateLogAt: 0,
+    lastRangeCheckUrl: ""
   };
 
   const els = {
@@ -54,6 +60,59 @@
     if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
     return data;
   }
+
+  function nowIso() { return new Date().toISOString(); }
+  function logPlaybackEvent(event, detail = {}) {
+    const item = {
+      at: nowIso(),
+      event,
+      position: Number(els.video?.currentTime || 0),
+      readyState: Number(els.video?.readyState || 0),
+      networkState: Number(els.video?.networkState || 0),
+      message: String(detail.message || "").slice(0, 220)
+    };
+    state.playbackEvents.push(item);
+    state.playbackEvents = state.playbackEvents.slice(-30);
+    if (["waiting", "stalled", "error"].includes(event)) {
+      const msg = item.message ? `：${item.message}` : "";
+      els.playerState.textContent = `播放器事件：${event}${msg} · ${timeLabel(item.position)}`;
+    }
+  }
+  function mediaErrorText() {
+    const err = els.video && els.video.error;
+    if (!err) return "";
+    const map = { 1: "MEDIA_ERR_ABORTED", 2: "MEDIA_ERR_NETWORK", 3: "MEDIA_ERR_DECODE", 4: "MEDIA_ERR_SRC_NOT_SUPPORTED" };
+    return `${map[err.code] || "MEDIA_ERR_UNKNOWN"}${err.message ? " · " + err.message : ""}`;
+  }
+  function playbackDebugPayload() {
+    return {
+      events: state.playbackEvents.slice(-24),
+      range: state.playbackRange || { checked: false, ok: false, note: "本地文件或尚未检测 Range" },
+      lastError: state.lastPlaybackError || ""
+    };
+  }
+  async function checkRangeForSource(src) {
+    if (!src || !/^https?:\/\//i.test(src)) {
+      state.playbackRange = { checked: true, ok: true, note: "本地文件 / blob 播放，不需要 HTTP Range。若远程片源卡顿，请检查代理是否返回 206 Partial Content。" };
+      return;
+    }
+    if (state.lastRangeCheckUrl === src) return;
+    state.lastRangeCheckUrl = src;
+    try {
+      const res = await fetch(src, { method: "GET", headers: { Range: "bytes=0-1" } });
+      state.playbackRange = {
+        checked: true,
+        ok: res.status === 206,
+        status: res.status,
+        acceptRanges: res.headers.get("accept-ranges") || "",
+        contentRange: res.headers.get("content-range") || "",
+        note: res.status === 206 ? "Range 可用" : "片源/代理可能不支持 Range，长视频可能出现播一小段就卡住。"
+      };
+    } catch (e) {
+      state.playbackRange = { checked: true, ok: false, status: 0, note: `Range 检测失败：${e.message}` };
+    }
+  }
+
 
   function saveSettings() {
     state.serverUrl = cleanUrl(els.serverUrl.value) || cleanUrl(location.origin);
@@ -220,8 +279,13 @@
   function handleVideoFile(file) {
     if (!file) return;
     const url = URL.createObjectURL(file);
+    state.playbackEvents = [];
+    state.lastPlaybackError = "";
+    state.playbackRange = { checked: true, ok: true, note: "本地文件 / blob 播放，不需要 HTTP Range。" };
+    logPlaybackEvent("import-file", { message: file.name });
     els.video.src = url;
     els.video.load();
+    checkRangeForSource(url);
     els.playerState.textContent = `已导入影片：${file.name}`;
     rememberHall(file.name, 0);
     if (state.roomId) syncPlayback(true);
@@ -260,7 +324,8 @@
           duration: Number.isFinite(els.video.duration) ? els.video.duration : 0,
           paused: els.video.paused,
           title: currentVideoTitle(), fileName: els.videoFile.files[0]?.name || "",
-          actor: state.name, assistantName: state.assistantName
+          actor: state.name, assistantName: state.assistantName,
+          playbackDebug: playbackDebugPayload()
         })
       });
     } catch (e) { els.playerState.textContent = `同步失败：${e.message}`; }
@@ -268,56 +333,136 @@
   function applyRemotePlayback(room) {
     if (!room || !els.video.src || state.applyingRemote) return;
     if (room.lastActor === state.name) return;
+    const sinceLocal = Date.now() - state.lastLocalPlaybackActionAt;
     const remoteTime = Number(room.currentTime || 0);
-    if (Math.abs((els.video.currentTime || 0) - remoteTime) > 3) {
+    const localTime = els.video.currentTime || 0;
+    const diff = Math.abs(localTime - remoteTime);
+    // 用户刚刚手动播放/暂停/拖动时，先别被旧房间状态立刻回拉。
+    if (sinceLocal < 2600 && diff < 8) return;
+    if (diff > 4) {
       state.applyingRemote = true;
+      logPlaybackEvent("remote-seek", { message: `remote=${timeLabel(remoteTime)} local=${timeLabel(localTime)}` });
       els.video.currentTime = remoteTime;
-      setTimeout(() => state.applyingRemote = false, 350);
+      setTimeout(() => state.applyingRemote = false, 650);
     }
-    if (typeof room.paused === "boolean" && room.paused !== els.video.paused) {
+    if (typeof room.paused === "boolean" && room.paused !== els.video.paused && sinceLocal >= 2600) {
       state.applyingRemote = true;
+      logPlaybackEvent(room.paused ? "remote-pause" : "remote-play");
       if (room.paused) els.video.pause(); else els.video.play().catch(() => {});
-      setTimeout(() => state.applyingRemote = false, 350);
+      setTimeout(() => state.applyingRemote = false, 650);
     }
   }
 
   async function handleSubtitleFile(file) {
     if (!file) return;
-    const text = await file.text();
-    state.subtitles = parseSubtitle(text, file.name);
-    els.contextState.textContent = `已导入字幕：${file.name}，共 ${state.subtitles.length} 条。`;
+    try {
+      const decoded = await decodeSubtitleFile(file);
+      const parsed = parseSubtitle(decoded.text, file.name);
+      state.subtitles = parsed.cues;
+      if (parsed.cues.length) {
+        els.contextState.textContent = `已导入字幕：${file.name}，共 ${parsed.cues.length} 条（${decoded.encoding}）。`;
+      } else {
+        els.contextState.textContent = `字幕导入 0 条：${parsed.hint}（读取编码：${decoded.encoding}）。`;
+      }
+    } catch (e) {
+      state.subtitles = [];
+      els.contextState.textContent = `字幕导入失败：${e.message}`;
+    }
+  }
+  async function decodeSubtitleFile(file) {
+    const buffer = await file.arrayBuffer();
+    if (!buffer || !buffer.byteLength) throw new Error("文件为空");
+    const bytes = new Uint8Array(buffer);
+    const candidates = [];
+    function push(enc, offset = 0) {
+      try {
+        const text = new TextDecoder(enc).decode(buffer.slice(offset));
+        const normalized = normalizeSubtitleText(text);
+        const parsed = parseSubtitle(normalized, file.name);
+        const replacement = (normalized.match(/�/g) || []).length;
+        const timeline = countTimelineLines(normalized);
+        const cjk = (normalized.match(/[\u4e00-\u9fff]/g) || []).length;
+        candidates.push({ encoding: enc, text: normalized, score: parsed.cues.length * 1000 + timeline * 20 + cjk - replacement * 30 });
+      } catch {}
+    }
+    if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) push("utf-8", 3);
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) push("utf-16le", 2);
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) push("utf-16be", 2);
+    ["utf-8", "gb18030", "gbk", "utf-16le", "utf-16be"].forEach(enc => push(enc, 0));
+    candidates.sort((a,b) => b.score - a.score);
+    const best = candidates[0];
+    if (!best) throw new Error("编码读取失败");
+    return best;
+  }
+  function normalizeSubtitleText(text) {
+    return String(text || "")
+      .replace(/^\uFEFF/, "")
+      .replace(/[\u200B-\u200D\uFEFF]/g, "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n");
   }
   function parseSubtitle(text, name) {
+    const normalized = normalizeSubtitleText(text);
     const lower = String(name || "").toLowerCase();
-    if (lower.endsWith(".ass") || lower.endsWith(".ssa") || /\[Events\]/i.test(text)) return parseAss(text);
-    return parseSrtVtt(text);
+    const cues = (lower.endsWith(".ass") || lower.endsWith(".ssa") || /\[Events\]/i.test(normalized)) ? parseAss(normalized) : parseSrtVtt(normalized);
+    const finalCues = cues.length ? cues : parseSrtVtt(normalized);
+    return { cues: finalCues, hint: subtitleImportHint(normalized, finalCues) };
+  }
+  function subtitleImportHint(text, cues) {
+    if (!String(text || "").trim()) return "文件为空";
+    const timeline = countTimelineLines(text);
+    if (!timeline) return "已读到文本但未匹配时间轴，可能不是标准 SRT/VTT/ASS";
+    if (!cues.length) return "匹配到时间轴但正文为空，可能字幕结构不规范或正文被隐藏字符干扰";
+    return "解析成功";
+  }
+  function countTimelineLines(text) {
+    return normalizeSubtitleText(text).split("\n").filter(l => /-->/.test(l)).length;
   }
   function parseTime(s) {
-    const m = String(s).trim().replace(',', '.').match(/(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?/);
-    if (!m) return 0;
+    const m = String(s || "").trim().replace(',', '.').match(/(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?/);
+    if (!m) return NaN;
     const h = Number(m[1] || 0), min = Number(m[2] || 0), sec = Number(m[3] || 0), ms = Number((m[4] || "0").padEnd(3, "0"));
     return h * 3600 + min * 60 + sec + ms / 1000;
   }
   function cleanAssText(s) {
-    return String(s || "").replace(/\{[^}]*\}/g, "").replace(/\\N/g, "\n").replace(/\\h/g, " ").replace(/\s+/g, " ").trim();
+    return String(s || "").replace(/\{[^}]*\}/g, "").replace(/\\N/g, "\n").replace(/\\h/g, " ").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
   }
   function parseAss(text) {
-    return text.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l)).map(line => {
+    return normalizeSubtitleText(text).split("\n").filter(l => /^Dialogue:/i.test(l)).map(line => {
       const parts = line.replace(/^Dialogue:\s*/i, "").split(",");
       if (parts.length < 10) return null;
-      return { start: parseTime(parts[1]), end: parseTime(parts[2]), text: cleanAssText(parts.slice(9).join(",")) };
-    }).filter(c => c && c.text && c.end > c.start).sort((a,b) => a.start - b.start);
+      const start = parseTime(parts[1]);
+      const end = parseTime(parts[2]);
+      return { start, end, text: cleanAssText(parts.slice(9).join(",")) };
+    }).filter(c => c && c.text && Number.isFinite(c.start) && Number.isFinite(c.end) && c.end > c.start).sort((a,b) => a.start - b.start);
   }
   function parseSrtVtt(text) {
-    const blocks = text.replace(/^WEBVTT.*\n/i, "").split(/\n\s*\n/);
+    const lines = normalizeSubtitleText(text).replace(/^WEBVTT[^\n]*(\n|$)/i, "").split("\n");
     const cues = [];
-    for (const block of blocks) {
-      const lines = block.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
-      const idx = lines.findIndex(l => l.includes("-->"));
-      if (idx < 0) continue;
-      const [a,b] = lines[idx].split("-->").map(x => x.trim().split(/\s+/)[0]);
-      const body = lines.slice(idx + 1).join(" ").replace(/<[^>]+>/g, "").trim();
-      if (body) cues.push({ start: parseTime(a), end: parseTime(b), text: body });
+    for (let i = 0; i < lines.length; i++) {
+      const rawLine = lines[i] || "";
+      if (!rawLine.includes("-->")) continue;
+      const [left, rightRaw] = rawLine.split("-->");
+      const right = String(rightRaw || "").trim().split(/\s+/)[0];
+      const start = parseTime(left);
+      const end = parseTime(right);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+      const body = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const line = String(lines[j] || "").trim();
+        const next = String(lines[j + 1] || "");
+        if (line.includes("-->")) break;
+        if (!line) {
+          if (body.length) break;
+          continue;
+        }
+        if (/^\d+$/.test(line) && next.includes("-->")) break;
+        if (/^(NOTE|STYLE|REGION)(\s|$)/i.test(line)) continue;
+        body.push(line.replace(/<[^>]+>/g, "").trim());
+      }
+      const textBody = body.filter(Boolean).join(" ").trim();
+      if (textBody) cues.push({ start, end, text: textBody });
     }
     return cues.sort((a,b) => a.start - b.start);
   }
@@ -346,7 +491,8 @@
           duration: Number.isFinite(els.video.duration) ? els.video.duration : 0,
           paused: els.video.paused,
           title: currentVideoTitle(), fileName: els.videoFile.files[0]?.name || "",
-          currentSubtitle: text, recentSubtitles: recentSubtitles(), actor: state.name, assistantName: state.assistantName
+          currentSubtitle: text, recentSubtitles: recentSubtitles(), actor: state.name, assistantName: state.assistantName,
+          playbackDebug: playbackDebugPayload()
         })
       });
       els.contextState.textContent = text ? `已同步字幕：${text.slice(0, 48)}` : "已同步播放上下文。";
@@ -366,7 +512,7 @@
       const dataUrl = canvas.toDataURL("image/jpeg", .62);
       await request(`/api/rooms/${state.roomId}/screenshot`, {
         method: "POST",
-        body: JSON.stringify({ dataUrl, width: canvas.width, height: canvas.height, source: "pwa-manual-frame", actor: state.name, assistantName: state.assistantName, note: "映屿 PWA 手动截取当前本地视频帧。" })
+        body: JSON.stringify({ dataUrl, width: canvas.width, height: canvas.height, source: "pwa-manual-frame", actor: state.name, assistantName: state.assistantName, ocrText: [currentSubtitle(), ...recentSubtitles()].filter(Boolean).join("\n"), note: "映屿 PWA 手动截取当前本地视频帧。" })
       });
       setStatus("当前画面已上传给 AI 看一眼。");
     } catch (e) { setStatus(`截图失败：${e.message}。iOS 浏览器可能限制当前视频帧读取。`); }
@@ -409,10 +555,16 @@
     });
     els.videoFile.addEventListener("change", e => handleVideoFile(e.target.files[0]));
     els.subtitleFile.addEventListener("change", e => handleSubtitleFile(e.target.files[0]));
-    els.video.addEventListener("play", () => { if (!state.applyingRemote) syncPlayback(true); });
-    els.video.addEventListener("pause", () => { if (!state.applyingRemote) syncPlayback(true); });
-    els.video.addEventListener("seeked", () => { if (!state.applyingRemote) syncPlayback(true); });
-    els.video.addEventListener("timeupdate", () => { syncContextIfNeeded(); syncPlayback(false); });
+    els.video.addEventListener("loadedmetadata", () => { logPlaybackEvent("loadedmetadata"); checkRangeForSource(els.video.currentSrc || els.video.src); });
+    els.video.addEventListener("canplay", () => logPlaybackEvent("canplay"));
+    els.video.addEventListener("waiting", () => logPlaybackEvent("waiting"));
+    els.video.addEventListener("stalled", () => logPlaybackEvent("stalled"));
+    els.video.addEventListener("progress", () => logPlaybackEvent("progress"));
+    els.video.addEventListener("error", () => { state.lastPlaybackError = mediaErrorText(); logPlaybackEvent("error", { message: state.lastPlaybackError }); syncPlayback(true); });
+    els.video.addEventListener("play", () => { state.lastLocalPlaybackActionAt = Date.now(); logPlaybackEvent("play"); if (!state.applyingRemote) syncPlayback(true); });
+    els.video.addEventListener("pause", () => { state.lastLocalPlaybackActionAt = Date.now(); logPlaybackEvent("pause"); if (!state.applyingRemote) syncPlayback(true); });
+    els.video.addEventListener("seeked", () => { state.lastLocalPlaybackActionAt = Date.now(); logPlaybackEvent("seeked"); if (!state.applyingRemote) syncPlayback(true); });
+    els.video.addEventListener("timeupdate", () => { if (Date.now() - state.lastTimeupdateLogAt > 5000) { state.lastTimeupdateLogAt = Date.now(); logPlaybackEvent("timeupdate"); } syncContextIfNeeded(); syncPlayback(false); });
     $("clearHallBtn").addEventListener("click", () => { state.hall = []; localStorage.removeItem("cineisle.hall"); renderHall(); });
     $("installTipBtn").addEventListener("click", () => els.installDialog.showModal());
     $("closeInstallDialog").addEventListener("click", () => els.installDialog.close());

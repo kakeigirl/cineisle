@@ -10,8 +10,8 @@ android {
         applicationId 'com.cineisle.app'
         minSdk 23
         targetSdk 35
-        versionCode 11
-        versionName '0.4.0'
+        versionCode 12
+        versionName '0.4.2'
     }
 }
 
