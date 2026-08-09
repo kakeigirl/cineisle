@@ -1562,7 +1562,7 @@ private final Runnable poller = new Runnable() {
         e.apply();
         updateServicePrefs();
         if (contextState != null) contextState.setText(contextStatusText());
-        toast("已请求" + aiName() + "看一眼，保持映屿在前台");
+        toast("已请求" + aiName() + "看一眼，请停留在想给它看的画面");
     }
 
 

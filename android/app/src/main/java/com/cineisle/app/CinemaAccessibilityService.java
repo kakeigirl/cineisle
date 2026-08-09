@@ -70,12 +70,9 @@ public class CinemaAccessibilityService extends AccessibilityService {
         boolean auto = sp.getBoolean("autoScreenshot", false);
         if (!auto && !localForce && !remoteForce) return;
 
-        // 为了隐私，只在映屿前台时自动/远程上传。刚启动时 foregroundPackage 可能为空，允许本地立即截图先试一次。
-        boolean inCinema = getPackageName().equals(foregroundPackage) || (localForce && foregroundPackage.length() == 0);
-        if (!inCinema) {
-            setStatus("未截图：映屿不在前台（当前 " + foregroundPackage + "）");
-            return;
-        }
+        // v0.4.3：不再限制必须映屿在前台。用户开启截图开关/发起“看一眼”后，
+        // 无障碍服务会截取当前屏幕，便于 AI 看见此刻实际播放或展示的画面。
+        // 隐私控制改由“自动截图 ON/OFF”、系统无障碍截图权限、房间 Token 共同承担。
 
         boolean force = localForce || remoteForce;
         long now = System.currentTimeMillis();
@@ -184,7 +181,7 @@ public class CinemaAccessibilityService extends AccessibilityService {
         body.put("width", width);
         body.put("height", height);
         body.put("source", source);
-        body.put("note", "映屿画面同步：仅在本 App 前台且用户开启截图后上传。");
+        body.put("note", "映屿画面同步：用户开启截图后上传当前屏幕，不再要求映屿处于前台。");
         try(OutputStream os = c.getOutputStream()) {
             os.write(body.toString().getBytes("UTF-8"));
         }

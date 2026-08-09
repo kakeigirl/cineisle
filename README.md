@@ -12,14 +12,19 @@
 
 公开版支持在设置里填写 **AI 名字**。填写后，App / PWA 内和 MCP 截图请求会同步这个名字，例如「给小G看一眼」「给林澈看一眼」。
 
-## 本次更新：v0.4.2 用户反馈修复版
+## 本次更新：v0.4.3 截图前台限制调整
+
+- 移除 Android 无障碍截图的「映屿必须在前台」限制；开启截图或请求「看一眼」后，会上传当前屏幕，方便用户把实际正在播放/展示的画面交给 AI 看。
+- 本地按钮提示改为“请停留在想给 AI 看的画面”，README 与 MCP `request_screenshot` 描述同步更新。
+
+### v0.4.2 用户反馈修复版
 
 - 修复 **MCP 截图通道可见性**：截图上传后会生成可访问的 `image_url`，MCP 返回里同时保留图片元数据、`image_url`、`ocrText / fallbackText`，避免模型只拿到 `mcp_img_xxx.jpg` 占位符却看不到真实像素。
 - 新增 MCP 工具：`get_screenshot_text` 用于读取最近截图的图片地址与文本兜底；`get_playback_debug` 用于读取播放器事件、卡顿、错误和 Range 检测信息。
 - 优化 **SRT/VTT/ASS 字幕导入**：PWA 与 Android 均增强 UTF-8、UTF-8 BOM、GB18030、UTF-16LE/BE、CRLF 换行、零宽字符、逗号毫秒时间轴等兼容；导入 0 条时给出更具体原因。
 - 优化 **播放十秒后卡住排查**：PWA 记录 `loadedmetadata / canplay / waiting / stalled / error / timeupdate / progress` 等事件，同步到后端；远程同步增加保护，避免用户刚播放就被旧房间状态回拉。
 - 增加 Range 诊断：PWA 会对 HTTP(S) 片源尝试 `Range: bytes=0-1` 检测；本地文件会标记为“不需要 Range”。如果远程片源/代理不支持 206 Partial Content，调试信息会提示。
-- 版本更新：后端 `0.4.2-feedback-fix`，Android `versionName 0.4.2 / versionCode 12`。
+- 版本更新：后端 `0.4.3`，Android `versionName 0.4.3 / versionCode 13`。
 
 ## 功能
 
@@ -399,12 +404,11 @@ cineisle-source-zip
 1. 在 App 里打开「自动截图 ON」；
 2. 到系统无障碍设置里开启「映屿画面同步」。
 
-开启后，App 只会在映屿处于前台时低频上传画面截图。横屏里也可以点右侧抽屉的「给{AI 名字}看一眼」来请求立即截图一次。
+开启后，App 会通过系统无障碍截图能力低频上传当前屏幕，不再要求映屿处于前台。横屏里也可以点右侧抽屉的「给{AI 名字}看一眼」来请求立即截图一次；请求后请停留在想给 AI 看的画面。
 
 如果截图没有出现，可以先看 App 里的「截图状态」提示，常见情况包括：
 
 ```text
-未截图：映屿不在前台
 系统截图失败：请确认无障碍权限
 HTTP 403：Token 不一致
 HTTP 413：截图太大
@@ -448,7 +452,7 @@ https://cineisle-server.onrender.com/mcp?token=change-me
 | `control_playback` | 同步播放、暂停、跳转进度 |
 | `add_note` | 添加时间轴观影笔记 |
 | `generate_card` | 生成或更新观影卡片 |
-| `request_screenshot` | 请求手机端在映屿前台立即上传一张低频截图；默认请求者会使用房间里的 AI 名字 |
+| `request_screenshot` | 请求手机端立即上传一张当前屏幕截图；默认请求者会使用房间里的 AI 名字 |
 | `get_viewing_context` | 读取播放状态、当前字幕、最近字幕和可选截图 |
 
 ## 给 AI 的示例指令
@@ -482,7 +486,7 @@ https://cineisle-server.onrender.com/mcp?token=change-me
 - 「影厅」只保存本机影片信息、片名和上次进度。
 - 后端会保存房间状态、聊天、弹幕、笔记、观影卡片、字幕上下文和最近 5 张截图摘要。
 - Android 截图功能默认不会偷偷开启，需要用户在 App 内打开开关，并启用系统无障碍服务。
-- Android 截图只在映屿 App 前台时上传。
+- Android 截图不再要求映屿 App 处于前台；开启截图后会上传当前屏幕，请只在愿意让 AI 看见当前画面时使用。
 - iOS/PWA 不具备全局控制或后台截图权限，只能在映屿页面内工作。
 - Render 免费服务可能会休眠，首次打开可能需要等待几十秒。
 - 公开部署时请设置 `CINEISLE_TOKEN`，不要把 Token 发到公开评论区或截图里。
@@ -494,7 +498,7 @@ https://cineisle-server.onrender.com/mcp?token=change-me
 当前公开版：
 
 ```text
-CineIsle Public v0.4.2 用户反馈修复版
+CineIsle Public v0.4.3 截图前台限制调整
 ```
 
 公开版已移除私人称呼和私密标识，适合开源、自部署和二次定制。

@@ -457,7 +457,7 @@ function mcpTools() {
     },
     {
       name: "request_screenshot",
-      description: "请求手机端在映屿前台立即上传一张低频画面截图；类似掌心窗 peek，但只在用户开启映屿截图权限后生效",
+      description: "请求手机端立即上传一张当前屏幕截图；类似掌心窗 peek，但只在用户开启映屿截图权限后生效",
       inputSchema: {
         type: "object",
         properties: {
