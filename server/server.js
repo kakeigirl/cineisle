@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
-const APP_VERSION = "0.4.2-feedback-fix";
+const APP_VERSION = "0.4.4-railway-fixed-signing";
 
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));

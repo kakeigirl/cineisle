@@ -12,7 +12,14 @@
 
 公开版支持在设置里填写 **AI 名字**。填写后，App / PWA 内和 MCP 截图请求会同步这个名字，例如「给小G看一眼」「给林澈看一眼」。
 
-## 本次更新：v0.4.3 截图前台限制调整
+## 本次更新：v0.4.4 Railway 部署与固定签名
+
+- 新增 Railway 部署配置：根目录加入 `railway.json`、`Dockerfile`、`start.sh` 和根目录 `package.json`，避免 Railway 把 Android Gradle 工程误判成后端服务。
+- Railway 部署时只运行 `server/` 后端，并配置 `/api/health` 健康检查。
+- Android debug APK 改用固定 debug 签名，后续 GitHub Actions 构建的 APK 更容易覆盖安装，减少因随机签名变化导致的数据丢失风险。
+- 补充 `docs/RAILWAY_DEPLOY.md` 和 `docs/FIXED_ANDROID_SIGNING.md`。
+
+### v0.4.3 截图前台限制调整
 
 - 移除 Android 无障碍截图的「映屿必须在前台」限制；开启截图或请求「看一眼」后，会上传当前屏幕，方便用户把实际正在播放/展示的画面交给 AI 看。
 - 本地按钮提示改为“请停留在想给 AI 看的画面”，README 与 MCP `request_screenshot` 描述同步更新。
@@ -24,7 +31,7 @@
 - 优化 **SRT/VTT/ASS 字幕导入**：PWA 与 Android 均增强 UTF-8、UTF-8 BOM、GB18030、UTF-16LE/BE、CRLF 换行、零宽字符、逗号毫秒时间轴等兼容；导入 0 条时给出更具体原因。
 - 优化 **播放十秒后卡住排查**：PWA 记录 `loadedmetadata / canplay / waiting / stalled / error / timeupdate / progress` 等事件，同步到后端；远程同步增加保护，避免用户刚播放就被旧房间状态回拉。
 - 增加 Range 诊断：PWA 会对 HTTP(S) 片源尝试 `Range: bytes=0-1` 检测；本地文件会标记为“不需要 Range”。如果远程片源/代理不支持 206 Partial Content，调试信息会提示。
-- 版本更新：后端 `0.4.3`，Android `versionName 0.4.3 / versionCode 13`。
+- 版本更新：后端 `0.4.4-railway-fixed-signing`，Android `versionName 0.4.4 / versionCode 14`。
 
 ## 功能
 
@@ -64,6 +71,11 @@
 │  └─ render.yaml                 # Render 从 server/ 单独部署时可用
 ├─ docs/                          # 补充教程
 ├─ render.yaml                    # Render 一键部署配置，rootDir 指向 server
+├─ railway.json                   # Railway 配置，明确走 Dockerfile / 后端服务
+├─ Dockerfile                     # Railway/容器部署：只运行 server/ 后端
+├─ start.sh                       # Railway 手动 Start Command 兼容入口
+├─ package.json                   # 根目录部署辅助脚本
+├─ android/signing/               # 固定 debug 签名，用于 debug APK 覆盖安装
 ├─ .github/workflows/
 │  ├─ build-debug-apk.yml         # Android APK 自动打包
 │  ├─ package-source-zip.yml      # 打包源码 ZIP
@@ -189,7 +201,35 @@ iOS 用户直接用 Safari 打开 Render 地址，在页面内填写同样的后
 
 ---
 
-## 方案 B：局域网部署后端（同一 Wi‑Fi 内使用）
+## 方案 B：Railway 部署后端
+
+本版已经补好 Railway 所需文件：`railway.json`、`Dockerfile`、`start.sh` 和根目录 `package.json`。Railway 应该会优先使用 Dockerfile，只运行 `server/` 目录里的 Node 后端，不再把根目录的 Android `build.gradle` 当成服务入口。
+
+部署后建议在 Railway Variables 里设置：
+
+```text
+CINEISLE_TOKEN=自己设置一个长一点的口令
+NODE_ENV=production
+```
+
+部署成功后打开：
+
+```text
+https://你的 Railway 地址/api/health
+```
+
+返回 `ok: true` 就说明后端成功。
+
+如果 Railway 仍旧走 Railpack 或面板里保留了旧设置，可以手动填：
+
+```text
+Build Command: npm run railway:build
+Start Command: npm run railway:start
+```
+
+详细说明见：`docs/RAILWAY_DEPLOY.md`。
+
+## 方案 C：局域网部署后端（同一 Wi‑Fi 内使用）
 
 这个方案适合宿舍、家里、同一个 Wi‑Fi 下测试，不需要 Render。
 
@@ -498,7 +538,7 @@ https://cineisle-server.onrender.com/mcp?token=change-me
 当前公开版：
 
 ```text
-CineIsle Public v0.4.3 截图前台限制调整
+CineIsle Public v0.4.4 Railway 部署与固定签名
 ```
 
 公开版已移除私人称呼和私密标识，适合开源、自部署和二次定制。
