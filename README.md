@@ -12,7 +12,14 @@
 
 公开版支持在设置里填写 **AI 名字**。填写后，App / PWA 内和 MCP 截图请求会同步这个名字，例如「给小G看一眼」「给林澈看一眼」。
 
-## 本次更新：v0.4.4 Railway 部署与固定签名
+## 本次更新：v0.4.5 AI 持续陪看模式
+
+- 新增 MCP 工具 `wait_for_room_event`：首次调用返回房间基线和 `cursor`，后续带着 `cursor` 长轮询等待新事件。
+- 新聊天、播放/暂停/跳转和截图会立即唤醒陪看中的 AI；无人操作时最多 45 秒返回一次最新字幕上下文。
+- 默认只监听 `message / playback / screenshot`，避免每句字幕都触发回复；需要时可通过 `eventTypes` 自定义。
+- 陪看时建议循环调用：`wait_for_room_event(room)` 获取基线，再用返回的 `cursor` 继续等待，直到用户结束观影。
+
+## v0.4.4 Railway 部署与固定签名
 
 - 新增 Railway 部署配置：根目录加入 `railway.json`、`Dockerfile`、`start.sh` 和根目录 `package.json`，避免 Railway 把 Android Gradle 工程误判成后端服务。
 - Railway 部署时只运行 `server/` 后端，并配置 `/api/health` 健康检查。
@@ -488,6 +495,7 @@ https://cineisle-server.onrender.com/mcp?token=change-me
 | --- | --- |
 | `create_room` | 创建观影房间 |
 | `get_room_state` | 读取房间状态、播放进度、聊天、笔记和卡片 |
+| `wait_for_room_event` | 长轮询等待新聊天、播放操作或截图；超时返回最新字幕，供 AI 持续陪看 |
 | `send_room_message` | 发送聊天或弹幕 |
 | `control_playback` | 同步播放、暂停、跳转进度 |
 | `add_note` | 添加时间轴观影笔记 |

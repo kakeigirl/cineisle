@@ -4,13 +4,32 @@ const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
-const APP_VERSION = "0.4.4-railway-fixed-signing";
+const APP_VERSION = "0.4.5-watch-mode";
 
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
 app.use(express.static("public"));
 
 const rooms = new Map();
+const roomEventStates = new Map();
+
+function eventState(roomId) {
+  const id = String(roomId || "").toUpperCase();
+  if (!roomEventStates.has(id)) {
+    roomEventStates.set(id, { seq: 0, events: [], waiters: new Set() });
+  }
+  return roomEventStates.get(id);
+}
+
+function roomEvent(r, type, data = {}) {
+  if (!r || !r.id) return null;
+  const state = eventState(r.id);
+  const event = { seq: ++state.seq, type, at: now(), data };
+  state.events.push(event);
+  while (state.events.length > 200) state.events.shift();
+  for (const wake of Array.from(state.waiters)) wake();
+  return event;
+}
 
 function code() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -156,6 +175,90 @@ function compactContext(ctx, includeFrameData, req, roomId) {
 function pub(r, req){
   return {...r, messages:r.messages.slice(-80), notes:r.notes.slice(-80), context: compactContext(r.context, false, req, r.id)};
 }
+
+function watchSnapshot(r, req) {
+  const context = compactContext(r.context, false, req, r.id);
+  delete context.playbackDebug;
+  return {
+    id: r.id,
+    title: r.title,
+    fileName: r.fileName,
+    duration: r.duration,
+    currentTime: r.currentTime,
+    paused: r.paused,
+    lastActor: r.lastActor,
+    assistantName: r.assistantName,
+    messages: r.messages.slice(-16),
+    notes: r.notes.slice(-8),
+    context
+  };
+}
+
+function normalizeWatchTypes(value) {
+  const fallback = ["message", "playback", "screenshot"];
+  if (!Array.isArray(value) || value.length === 0) return fallback;
+  return value.map(x => safeText(x, 40)).filter(Boolean).slice(0, 12);
+}
+
+async function waitForRoomEvent(args, req) {
+  const roomId = String(args.room || args.room_id || "").trim().toUpperCase();
+  const r = rooms.get(roomId);
+  if (!r) throw new Error("ROOM_NOT_FOUND");
+
+  const state = eventState(roomId);
+  const rawCursor = args.after ?? args.cursor;
+  const hasCursor = rawCursor !== undefined && rawCursor !== null && rawCursor !== "";
+  const after = hasCursor ? Math.max(0, Number(rawCursor) || 0) : state.seq;
+  const eventTypes = normalizeWatchTypes(args.eventTypes || args.events);
+  const timeoutSeconds = Math.min(45, Math.max(5, Number(args.timeoutSeconds || 40)));
+
+  const matchedEvents = () => state.events
+    .filter(event => event.seq > after && eventTypes.includes(event.type))
+    .slice(-20);
+
+  if (!hasCursor) {
+    return {
+      ok: true,
+      baseline: true,
+      timedOut: false,
+      cursor: state.seq,
+      eventTypes,
+      events: [],
+      room: watchSnapshot(r, req)
+    };
+  }
+
+  let events = matchedEvents();
+  if (events.length === 0) {
+    await new Promise(resolve => {
+      let settled = false;
+      let timer;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        state.waiters.delete(wake);
+        resolve();
+      };
+      const wake = () => {
+        if (matchedEvents().length) finish();
+      };
+      state.waiters.add(wake);
+      timer = setTimeout(finish, timeoutSeconds * 1000);
+    });
+    events = matchedEvents();
+  }
+
+  return {
+    ok: true,
+    baseline: false,
+    timedOut: events.length === 0,
+    cursor: state.seq,
+    eventTypes,
+    events,
+    room: watchSnapshot(r, req)
+  };
+}
 function getTokenFromReq(req) {
   return (req.headers.authorization || "").replace(/^Bearer\s+/i,"")
     || req.headers["x-cineisle-token"]
@@ -189,6 +292,7 @@ app.post("/api/rooms",(req,res)=>{
   r.partner = req.body.partner || r.partner;
   r.mood = req.body.mood || r.mood;
   r.inviteNote = req.body.inviteNote || r.inviteNote;
+  roomEvent(r, "room", { actor: req.body.partner || "观影人", title: r.title });
   res.json({ok:true, room: pub(r, req)});
 });
 app.get("/api/rooms/:id",(req,res)=>{
@@ -201,10 +305,12 @@ app.post("/api/rooms/:id/message", auth, (req,res)=>{
   applyAssistantName(r, req.body);
   const m = { id:Date.now()+"", name:req.body.name || "观影人", text:String(req.body.text || "").slice(0,500), at:now() };
   r.messages.push(m); r.updatedAt = now();
+  roomEvent(r, "message", m);
   res.json({ok:true, message:m, room:pub(r, req)});
 });
 app.post("/api/rooms/:id/playback", auth, (req,res)=>{
   const r = ensure(req.params.id);
+  const previous = { currentTime:r.currentTime, paused:r.paused, fileName:r.fileName };
   applyAssistantName(r, req.body);
   if (typeof req.body.currentTime === "number") r.currentTime = Math.max(0, req.body.currentTime);
   if (typeof req.body.duration === "number") r.duration = Math.max(0, req.body.duration);
@@ -220,6 +326,12 @@ app.post("/api/rooms/:id/playback", auth, (req,res)=>{
     r.context.playbackDebug = cleanPlaybackDebug(req.body.playbackDebug);
   }
   r.updatedAt = now();
+  const playbackChanged = previous.paused !== r.paused
+    || Math.abs(Number(previous.currentTime || 0) - Number(r.currentTime || 0)) >= 8
+    || previous.fileName !== r.fileName;
+  if (playbackChanged) {
+    roomEvent(r, "playback", { currentTime:r.currentTime, paused:r.paused, actor:r.lastActor, fileName:r.fileName });
+  }
   res.json({ok:true, room:pub(r, req)});
 });
 app.post("/api/rooms/:id/note", auth, (req,res)=>{
@@ -227,6 +339,7 @@ app.post("/api/rooms/:id/note", auth, (req,res)=>{
   applyAssistantName(r, req.body);
   const n = { id:Date.now()+"", name:req.body.name || "观影人", text:String(req.body.text || "").slice(0,800), type:req.body.type || "note", time:req.body.time || r.currentTime, at:now() };
   r.notes.push(n); r.updatedAt = now();
+  roomEvent(r, "note", n);
   res.json({ok:true, note:n, room:pub(r, req)});
 });
 app.post("/api/rooms/:id/card", auth, (req,res)=>{
@@ -248,11 +361,13 @@ app.post("/api/rooms/:id/card", auth, (req,res)=>{
     generatedAt:now()
   };
   r.updatedAt = now();
+  roomEvent(r, "card", { title:r.card.title, rating:r.card.rating, template:r.card.template });
   res.json({ok:true, card:r.card, room:pub(r, req)});
 });
 
 app.post("/api/rooms/:id/context", auth, (req,res)=>{
   const r = ensure(req.params.id);
+  const previousSubtitle = String((r.context && r.context.currentSubtitle) || "");
   applyAssistantName(r, req.body);
   const ctx = r.context || (r.context = {});
   if (typeof req.body.currentTime === "number") r.currentTime = Math.max(0, req.body.currentTime);
@@ -274,6 +389,9 @@ app.post("/api/rooms/:id/context", auth, (req,res)=>{
   if (req.body.playbackDebug) ctx.playbackDebug = cleanPlaybackDebug(req.body.playbackDebug);
   r.lastActor = ctx.actor;
   r.updatedAt = now();
+  if (ctx.currentSubtitle && ctx.currentSubtitle !== previousSubtitle) {
+    roomEvent(r, "subtitle", { currentTime:r.currentTime, text:ctx.currentSubtitle, actor:ctx.actor });
+  }
   res.json({ok:true, context: compactContext(ctx, false, req, r.id), room: pub(r, req)});
 });
 
@@ -320,6 +438,7 @@ app.post("/api/rooms/:id/screenshot", auth, (req,res)=>{
   ctx.actor = String(req.body.actor || req.body.name || ctx.actor || "观影人").slice(0,80);
   ctx.observedAt = now();
   r.updatedAt = now();
+  roomEvent(r, "screenshot", { frameId, actor:ctx.actor, source:ctx.frameSource, uploadedAt:ctx.frameUpdatedAt });
   res.json({ok:true, frame: compactContext(ctx, false, req, r.id).latestFrame, ocrText, fallbackText, room: pub(r, req)});
 });
 
@@ -333,6 +452,7 @@ app.post("/api/rooms/:id/screenshot-request", auth, (req,res)=>{
   applyAssistantName(r, req.body);
   r.context.actor = req.body.actor || req.body.name || defaultAssistant(r);
   r.updatedAt = now();
+  roomEvent(r, "screenshot_request", { requestId, actor:r.context.actor, requestedAt:r.context.screenshotRequestedAt });
   res.json({ok:true, requestId, requestedAt:r.context.screenshotRequestedAt, room:pub(r, req)});
 });
 app.get("/api/rooms/:id/screenshot-request", auth, (req,res)=>{
@@ -409,6 +529,24 @@ function mcpTools() {
         type: "object",
         properties: {
           room: { type: "string", description: "房间号" }
+        },
+        required: ["room"]
+      }
+    },
+    {
+      name: "wait_for_room_event",
+      description: "陪看模式长轮询：等待房间出现新聊天、播放操作或截图；首次不传 cursor 会立即返回基线与 cursor，后续循环传回 cursor。无人操作时会在超时后返回最新字幕上下文，适合 AI 持续陪看。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          room: { type: "string", description: "房间号" },
+          cursor: { type: "number", description: "上一次返回的 cursor；首次调用不要填写" },
+          timeoutSeconds: { type: "number", description: "最长等待秒数，范围 5-45，默认 40" },
+          eventTypes: {
+            type: "array",
+            items: { type: "string", enum: ["message", "playback", "subtitle", "screenshot", "screenshot_request", "note", "card", "room"] },
+            description: "立即唤醒的事件类型；默认 message、playback、screenshot"
+          }
         },
         required: ["room"]
       }
@@ -569,7 +707,7 @@ function mcpPayload(obj) {
   return out;
 }
 
-function callCinemaTool(name, args, req) {
+async function callCinemaTool(name, args, req) {
   args = args || {};
 
   if (name === "create_room") {
@@ -580,6 +718,7 @@ function callCinemaTool(name, args, req) {
     r.partner = args.partner || r.partner;
     r.mood = args.mood || r.mood;
     r.inviteNote = args.inviteNote || r.inviteNote;
+    roomEvent(r, "room", { actor:defaultAssistant(r), title:r.title });
     return pub(r, req);
   }
 
@@ -587,6 +726,10 @@ function callCinemaTool(name, args, req) {
     const r = rooms.get(String(args.room || args.room_id || "").toUpperCase());
     if (!r) throw new Error("ROOM_NOT_FOUND");
     return pub(r, req);
+  }
+
+  if (name === "wait_for_room_event") {
+    return waitForRoomEvent(args, req);
   }
 
   if (name === "send_room_message") {
@@ -600,11 +743,13 @@ function callCinemaTool(name, args, req) {
     };
     r.messages.push(m);
     r.updatedAt = now();
+    roomEvent(r, "message", m);
     return { message: m, room: pub(r, req) };
   }
 
   if (name === "control_playback") {
     const r = ensure(args.room || args.room_id);
+    const previous = { currentTime:r.currentTime, paused:r.paused };
     if (typeof args.currentTime === "number") r.currentTime = Math.max(0, args.currentTime);
     if (typeof args.paused === "boolean") r.paused = args.paused;
     if (args.partner) r.partner = String(args.partner).slice(0,80);
@@ -613,6 +758,9 @@ function callCinemaTool(name, args, req) {
     applyAssistantName(r, args);
     r.lastActor = args.actor || defaultAssistant(r);
     r.updatedAt = now();
+    if (previous.paused !== r.paused || Math.abs(Number(previous.currentTime || 0) - Number(r.currentTime || 0)) >= 1) {
+      roomEvent(r, "playback", { currentTime:r.currentTime, paused:r.paused, actor:r.lastActor });
+    }
     return pub(r, req);
   }
 
@@ -628,6 +776,7 @@ function callCinemaTool(name, args, req) {
     };
     r.notes.push(n);
     r.updatedAt = now();
+    roomEvent(r, "note", n);
     return { note: n, room: pub(r, req) };
   }
 
@@ -641,6 +790,7 @@ function callCinemaTool(name, args, req) {
     applyAssistantName(r, args);
     r.context.actor = args.actor || defaultAssistant(r);
     r.updatedAt = now();
+    roomEvent(r, "screenshot_request", { requestId, actor:r.context.actor, requestedAt:r.context.screenshotRequestedAt });
     return { ok:true, requestId, requestedAt:r.context.screenshotRequestedAt, room:pub(r, req) };
   }
 
@@ -698,6 +848,7 @@ function callCinemaTool(name, args, req) {
       generatedAt: now()
     };
     r.updatedAt = now();
+    roomEvent(r, "card", { title:r.card.title, rating:r.card.rating, template:r.card.template });
     return { card: r.card, room: pub(r, req) };
   }
 
@@ -712,7 +863,7 @@ function rpcError(id, code, message) {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-function handleMcpMessage(req, msg) {
+async function handleMcpMessage(req, msg) {
   const id = msg.id;
   const method = msg.method || msg.tool || msg.name;
   const params = msg.params || {};
@@ -741,7 +892,7 @@ function handleMcpMessage(req, msg) {
     const toolName = params.name;
     const toolArgs = params.arguments || {};
     try {
-      const result = callCinemaTool(toolName, toolArgs, req);
+      const result = await callCinemaTool(toolName, toolArgs, req);
       return rpcResult(id, mcpPayload(result));
     } catch (e) {
       return rpcError(id, -32000, e.message);
@@ -749,10 +900,10 @@ function handleMcpMessage(req, msg) {
   }
 
   // 兼容旧写法：直接 method=create_room / send_room_message
-  if (["create_room", "get_room_state", "send_room_message", "control_playback", "add_note", "generate_card", "get_viewing_context", "request_screenshot", "get_screenshot_text", "get_playback_debug"].includes(method)) {
+  if (["create_room", "get_room_state", "wait_for_room_event", "send_room_message", "control_playback", "add_note", "generate_card", "get_viewing_context", "request_screenshot", "get_screenshot_text", "get_playback_debug"].includes(method)) {
     if (!isAuthed(req)) return rpcError(id || 1, -32001, "CINEISLE_BAD_TOKEN");
     try {
-      const result = callCinemaTool(method, args, req);
+      const result = await callCinemaTool(method, args, req);
       return id ? rpcResult(id, mcpPayload(result)) : { ok: true, result };
     } catch (e) {
       return id ? rpcError(id, -32000, e.message) : { ok: false, error: e.message };
@@ -766,15 +917,15 @@ app.get("/mcp", (req, res) => {
   res.type("text/plain").send("CineIsle MCP endpoint is running. Use POST JSON-RPC.");
 });
 
-app.post("/mcp", (req, res) => {
+app.post("/mcp", async (req, res) => {
   try {
     const body = req.body || {};
     if (Array.isArray(body)) {
-      const out = body.map(msg => handleMcpMessage(req, msg)).filter(Boolean);
+      const out = (await Promise.all(body.map(msg => handleMcpMessage(req, msg)))).filter(Boolean);
       if (out.length === 0) return res.status(204).end();
       return res.json(out);
     }
-    const out = handleMcpMessage(req, body);
+    const out = await handleMcpMessage(req, body);
     if (!out) return res.status(204).end();
     return res.json(out);
   } catch (e) {
