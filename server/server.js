@@ -303,7 +303,11 @@ app.get("/api/rooms/:id",(req,res)=>{
 app.post("/api/rooms/:id/message", auth, (req,res)=>{
   const r = ensure(req.params.id);
   applyAssistantName(r, req.body);
-  const m = { id:Date.now()+"", name:req.body.name || "观影人", text:String(req.body.text || "").slice(0,500), at:now() };
+  const rawText = String(req.body.text || "").slice(0,500);
+const text = req.body.danmaku && !rawText.startsWith("弹幕：")
+  ? `弹幕：${rawText}`
+  : rawText;
+const m = { id:Date.now()+"", name:req.body.name || "观影人", text, at:now() };
   r.messages.push(m); r.updatedAt = now();
   roomEvent(r, "message", m);
   res.json({ok:true, message:m, room:pub(r, req)});
