@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
-const APP_VERSION = "0.4.5-watch-mode";
+const APP_VERSION = "0.4.6-room-recovery";
 
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
@@ -76,6 +76,59 @@ function publicBaseUrl(req) {
 }
 function safeText(v, max = 1200) {
   return String(v || "").replace(/[​-‍﻿]/g, "").trim().slice(0, max);
+}
+function cleanStoredMessage(input) {
+  if (!input || typeof input !== "object") return null;
+  const text = safeText(input.text, 500);
+  if (!text) return null;
+  return {
+    id: safeText(input.id, 100) || crypto.randomUUID(),
+    name: safeText(input.name, 80) || "观影人",
+    text,
+    at: safeText(input.at, 80) || now()
+  };
+}
+function cleanStoredNote(input) {
+  if (!input || typeof input !== "object") return null;
+  const text = safeText(input.text, 800);
+  if (!text) return null;
+  return {
+    id: safeText(input.id, 100) || crypto.randomUUID(),
+    name: safeText(input.name, 80) || "观影人",
+    text,
+    type: safeText(input.type, 40) || "note",
+    time: Math.max(0, Number(input.time || 0)),
+    at: safeText(input.at, 80) || now()
+  };
+}
+function cleanStoredCard(input, fallbackTitle) {
+  if (!input || typeof input !== "object") return null;
+  const rating = Number(input.rating || 0);
+  return {
+    title: safeText(input.title, 120) || fallbackTitle || "未命名影片",
+    rating: Number.isFinite(rating) ? Math.min(5, Math.max(0, rating)) : 4.5,
+    template: ["ticket", "receipt", "postcard"].includes(input.template) ? input.template : "ticket",
+    partner: safeText(input.partner, 100),
+    mood: safeText(input.mood, 100),
+    inviteNote: safeText(input.inviteNote, 300),
+    quote: safeText(input.quote, 800),
+    note: safeText(input.note, 1600),
+    zhiQuote: safeText(input.zhiQuote, 800),
+    linQuote: safeText(input.linQuote, 800),
+    zhiNote: safeText(input.zhiNote, 1600),
+    linNote: safeText(input.linNote, 1600),
+    generatedAt: safeText(input.generatedAt, 80) || now()
+  };
+}
+function mergeStoredItems(restored, current, cleaner, max) {
+  const items = new Map();
+  for (const raw of [...(Array.isArray(restored) ? restored : []), ...(Array.isArray(current) ? current : [])]) {
+    const item = cleaner(raw);
+    if (item) items.set(item.id, item);
+  }
+  return Array.from(items.values())
+    .sort((a, b) => String(a.at).localeCompare(String(b.at)))
+    .slice(-max);
 }
 function frameSignature(roomId, frameId) {
   if (!TOKEN) return "";
@@ -300,14 +353,40 @@ app.get("/api/rooms/:id",(req,res)=>{
   if (!r) return res.status(404).json({ok:false,error:"ROOM_NOT_FOUND"});
   res.json({ok:true, room: pub(r, req)});
 });
+app.post("/api/rooms/:id/restore", auth, (req,res)=>{
+  const snapshot = req.body && typeof req.body.room === "object" ? req.body.room : req.body || {};
+  const r = ensure(req.params.id);
+  const hadPlayback = Boolean(r.fileName) || Number(r.duration || 0) > 0 || Number(r.currentTime || 0) > 0;
+  const incomingTitle = safeText(snapshot.title, 120);
+  if (incomingTitle && (r.title === "未命名影片" || !r.title)) r.title = incomingTitle;
+  if (!r.fileName && snapshot.fileName) r.fileName = safeText(snapshot.fileName, 180);
+  if (!r.duration && Number(snapshot.duration) > 0) r.duration = Math.max(0, Number(snapshot.duration));
+  if (!r.currentTime && Number(snapshot.currentTime) > 0) r.currentTime = Math.max(0, Number(snapshot.currentTime));
+  if (typeof snapshot.paused === "boolean" && !hadPlayback) r.paused = snapshot.paused;
+  if (r.assistantName === "观影助手" && snapshot.assistantName) r.assistantName = cleanAssistantName(snapshot.assistantName);
+  if ((!r.partner || r.partner === "观影人 A × 观影人 B") && snapshot.partner) r.partner = safeText(snapshot.partner, 100);
+  if ((!r.mood || r.mood === "夜航") && snapshot.mood) r.mood = safeText(snapshot.mood, 100);
+  if ((!r.inviteNote || r.inviteNote === "今晚一起登岛看一场电影。") && snapshot.inviteNote) r.inviteNote = safeText(snapshot.inviteNote, 300);
+  r.messages = mergeStoredItems(snapshot.messages, r.messages, cleanStoredMessage, 80);
+  r.notes = mergeStoredItems(snapshot.notes, r.notes, cleanStoredNote, 80);
+  if (snapshot.card) {
+    const restoredCard = cleanStoredCard(snapshot.card, r.title);
+    const currentCardAt = Date.parse((r.card && r.card.generatedAt) || "") || 0;
+    const restoredCardAt = Date.parse((restoredCard && restoredCard.generatedAt) || "") || 0;
+    if (!r.card || restoredCardAt > currentCardAt) r.card = restoredCard;
+  }
+  r.updatedAt = now();
+  roomEvent(r, "room", { actor:req.body.name || "观影人", title:r.title, restored:true });
+  res.json({ok:true, restored:true, room:pub(r, req)});
+});
 app.post("/api/rooms/:id/message", auth, (req,res)=>{
   const r = ensure(req.params.id);
   applyAssistantName(r, req.body);
   const rawText = String(req.body.text || "").slice(0,500);
-const text = req.body.danmaku && !rawText.startsWith("弹幕：")
-  ? `弹幕：${rawText}`
-  : rawText;
-const m = { id:Date.now()+"", name:req.body.name || "观影人", text, at:now() };
+  const text = req.body.danmaku && !rawText.startsWith("弹幕：")
+    ? `弹幕：${rawText}`
+    : rawText;
+  const m = { id:Date.now()+"", name:req.body.name || "观影人", text, at:now() };
   r.messages.push(m); r.updatedAt = now();
   roomEvent(r, "message", m);
   res.json({ok:true, message:m, room:pub(r, req)});

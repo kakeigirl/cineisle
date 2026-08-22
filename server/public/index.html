@@ -93,7 +93,10 @@
           </nav>
 
           <section id="tab-chat" class="tab-page active">
-            <div id="chatLog" class="log"></div>
+            <div class="chat-log-wrap">
+              <div id="chatLog" class="log"></div>
+              <button id="newMessagesBtn" class="new-messages-btn" type="button" hidden>有新消息 ↓</button>
+            </div>
             <div class="composer">
               <input id="chatInput" placeholder="发聊天 / 弹幕">
               <button id="sendChatBtn">聊天</button>

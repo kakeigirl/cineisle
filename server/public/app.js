@@ -22,14 +22,16 @@
     lastPlaybackError: "",
     lastLocalPlaybackActionAt: 0,
     lastTimeupdateLogAt: 0,
-    lastRangeCheckUrl: ""
+    lastRangeCheckUrl: "",
+    lastMessagesKey: "",
+    restorePromise: null
   };
 
   const els = {
     serverUrl: $("serverUrl"), token: $("token"), viewerName: $("viewerName"), assistantName: $("assistantName"),
     joinRoomInput: $("joinRoomInput"), statusLine: $("statusLine"), healthState: $("healthState"), roomTitle: $("roomTitle"), roomBadge: $("roomBadge"),
     video: $("video"), videoFile: $("videoFile"), subtitleFile: $("subtitleFile"), subtitleOverlay: $("subtitleOverlay"), danmakuLayer: $("danmakuLayer"),
-    playerState: $("playerState"), chatLog: $("chatLog"), chatInput: $("chatInput"), noteLog: $("noteLog"), noteInput: $("noteInput"),
+    playerState: $("playerState"), chatLog: $("chatLog"), chatInput: $("chatInput"), newMessagesBtn: $("newMessagesBtn"), noteLog: $("noteLog"), noteInput: $("noteInput"),
     quoteInput: $("quoteInput"), cardNoteInput: $("cardNoteInput"), cardTemplate: $("cardTemplate"), cardPreview: $("cardPreview"),
     contextState: $("contextState"), hallList: $("hallList"), installDialog: $("installDialog")
   };
@@ -57,7 +59,12 @@
     const text = await res.text();
     let data = null;
     try { data = text ? JSON.parse(text) : {}; } catch { data = { ok: false, error: text || `HTTP ${res.status}` }; }
-    if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
+    if (!res.ok || data.ok === false) {
+      const error = new Error(data.error || `HTTP ${res.status}`);
+      error.code = data.error || "HTTP_ERROR";
+      error.status = res.status;
+      throw error;
+    }
     return data;
   }
 
@@ -140,6 +147,114 @@
     try { state.hall = JSON.parse(localStorage.getItem("cineisle.hall") || "[]"); } catch { state.hall = []; }
     renderHall();
   }
+  function roomCacheKey(id) {
+    return `cineisle.room.${roomCode(id)}`;
+  }
+  function roomSnapshot(room) {
+    if (!room || !room.id) return null;
+    return {
+      id: roomCode(room.id),
+      createdAt: room.createdAt || "",
+      updatedAt: room.updatedAt || nowIso(),
+      title: room.title || "未命名影片",
+      fileName: room.fileName || "",
+      duration: Number(room.duration || 0),
+      currentTime: Number(room.currentTime || 0),
+      paused: room.paused !== false,
+      assistantName: room.assistantName || state.assistantName,
+      partner: room.partner || state.name,
+      mood: room.mood || "",
+      inviteNote: room.inviteNote || "",
+      messages: Array.isArray(room.messages) ? room.messages.slice(-80) : [],
+      notes: Array.isArray(room.notes) ? room.notes.slice(-80) : [],
+      card: room.card || null
+    };
+  }
+  function loadRoomCache(id) {
+    try {
+      const cached = JSON.parse(localStorage.getItem(roomCacheKey(id)) || "null");
+      return cached && cached.id ? cached : null;
+    } catch { return null; }
+  }
+  function saveRoomCache(room) {
+    const snapshot = roomSnapshot(room);
+    if (!snapshot) return;
+    try { localStorage.setItem(roomCacheKey(snapshot.id), JSON.stringify(snapshot)); } catch {}
+  }
+  function mergeCachedItems(cached, remote, max) {
+    const items = new Map();
+    for (const item of [...(Array.isArray(cached) ? cached : []), ...(Array.isArray(remote) ? remote : [])]) {
+      if (!item || !item.text) continue;
+      const key = String(item.id || `${item.at || ""}|${item.name || ""}|${item.text}`);
+      items.set(key, item);
+    }
+    return Array.from(items.values())
+      .sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")))
+      .slice(-max);
+  }
+  function newerCard(cached, remote) {
+    if (!cached) return remote || null;
+    if (!remote) return cached;
+    const cachedAt = Date.parse(cached.generatedAt || "") || 0;
+    const remoteAt = Date.parse(remote.generatedAt || "") || 0;
+    return remoteAt >= cachedAt ? remote : cached;
+  }
+  function mergeRoomWithCache(remote) {
+    if (!remote || !remote.id) return remote;
+    const cached = loadRoomCache(remote.id);
+    if (!cached) return remote;
+    const remoteHasPlayback = Number(remote.duration || 0) > 0 || Number(remote.currentTime || 0) > 0 || Boolean(remote.fileName);
+    return {
+      ...cached,
+      ...remote,
+      createdAt: cached.createdAt || remote.createdAt,
+      title: remote.title && remote.title !== "未命名影片" ? remote.title : (cached.title || remote.title),
+      fileName: remote.fileName || cached.fileName || "",
+      duration: remoteHasPlayback ? Number(remote.duration || 0) : Number(cached.duration || 0),
+      currentTime: remoteHasPlayback ? Number(remote.currentTime || 0) : Number(cached.currentTime || 0),
+      paused: remoteHasPlayback ? remote.paused !== false : cached.paused !== false,
+      assistantName: remote.assistantName && remote.assistantName !== "观影助手" ? remote.assistantName : (cached.assistantName || remote.assistantName),
+      partner: remote.partner && remote.partner !== "观影人 A × 观影人 B" ? remote.partner : (cached.partner || remote.partner),
+      mood: remote.mood && remote.mood !== "夜航" ? remote.mood : (cached.mood || remote.mood),
+      inviteNote: remote.inviteNote && remote.inviteNote !== "今晚一起登岛看一场电影。" ? remote.inviteNote : (cached.inviteNote || remote.inviteNote),
+      messages: mergeCachedItems(cached.messages, remote.messages, 80),
+      notes: mergeCachedItems(cached.notes, remote.notes, 80),
+      card: newerCard(cached.card, remote.card)
+    };
+  }
+  function roomNeedsRestore(remote, merged) {
+    if (!remote || !merged) return false;
+    const remoteMessageIds = new Set((remote.messages || []).map(x => String(x.id || "")));
+    const remoteNoteIds = new Set((remote.notes || []).map(x => String(x.id || "")));
+    return (merged.messages || []).some(x => !remoteMessageIds.has(String(x.id || "")))
+      || (merged.notes || []).some(x => !remoteNoteIds.has(String(x.id || "")))
+      || (!remote.card && Boolean(merged.card))
+      || ((Date.parse(merged.card?.generatedAt || "") || 0) > (Date.parse(remote.card?.generatedAt || "") || 0))
+      || (!Number(remote.duration || 0) && Number(merged.duration || 0) > 0)
+      || (remote.title === "未命名影片" && merged.title && merged.title !== remote.title);
+  }
+  function restoreRoomSnapshot(id, snapshot) {
+    if (state.restorePromise) return state.restorePromise;
+    state.restorePromise = request(`/api/rooms/${roomCode(id)}/restore`, {
+      method: "POST",
+      body: JSON.stringify({ room: roomSnapshot(snapshot), name: state.name, assistantName: state.assistantName })
+    }).finally(() => { state.restorePromise = null; });
+    return state.restorePromise;
+  }
+  function reconcileRoom(remote) {
+    const merged = mergeRoomWithCache(remote);
+    saveRoomCache(merged);
+    if (roomNeedsRestore(remote, merged)) {
+      restoreRoomSnapshot(remote.id, merged).then(data => {
+        if (!data.room) return;
+        const restored = mergeRoomWithCache(data.room);
+        saveRoomCache(restored);
+        state.room = restored;
+        renderRoom(restored);
+      }).catch(e => { els.playerState.textContent = `本地房间恢复失败：${e.message}`; });
+    }
+    return merged;
+  }
 
   async function checkHealth() {
     saveSettings();
@@ -174,14 +289,26 @@
       const data = await request(`/api/rooms/${id}`, { method: "GET" });
       enterRoom(id, data.room);
       setStatus(`已加入房间：${id}`);
-    } catch (e) { setStatus(`加入失败：${e.message}`); }
+    } catch (e) {
+      const cached = loadRoomCache(id);
+      if (e.code === "ROOM_NOT_FOUND" && cached) {
+        try {
+          const data = await restoreRoomSnapshot(id, cached);
+          enterRoom(id, data.room);
+          setStatus(`房间 ${id} 已从本地记录恢复。`);
+          return;
+        } catch (restoreError) { setStatus(`恢复失败：${restoreError.message}`); return; }
+      }
+      setStatus(`加入失败：${e.message}`);
+    }
   }
   function enterRoom(id, room) {
     state.roomId = roomCode(id);
-    state.room = room || state.room;
+    const cached = loadRoomCache(state.roomId);
+    state.room = room ? reconcileRoom(room) : (cached || state.room);
     els.joinRoomInput.value = state.roomId;
     saveSettings();
-    renderRoom(room);
+    renderRoom(state.room);
     if (state.polling) clearInterval(state.polling);
     state.polling = setInterval(fetchRoom, 2500);
     if (state.contextTimer) clearInterval(state.contextTimer);
@@ -192,10 +319,22 @@
     if (!state.roomId) return;
     try {
       const data = await request(`/api/rooms/${state.roomId}`, { method: "GET" });
-      state.room = data.room;
-      renderRoom(data.room);
-      applyRemotePlayback(data.room);
-    } catch (e) { els.playerState.textContent = `轮询失败：${e.message}`; }
+      state.room = reconcileRoom(data.room);
+      renderRoom(state.room);
+      applyRemotePlayback(state.room);
+    } catch (e) {
+      const cached = loadRoomCache(state.roomId);
+      if (e.code === "ROOM_NOT_FOUND" && cached) {
+        try {
+          const data = await restoreRoomSnapshot(state.roomId, cached);
+          state.room = reconcileRoom(data.room);
+          renderRoom(state.room);
+          els.playerState.textContent = "服务器重启后，已从本机恢复房间记录。";
+          return;
+        } catch (restoreError) { els.playerState.textContent = `房间恢复失败：${restoreError.message}`; return; }
+      }
+      els.playerState.textContent = `轮询失败：${e.message}`;
+    }
   }
 
   function renderRoom(room) {
@@ -206,9 +345,23 @@
     renderNotes(room.notes || []);
     renderCard(room.card);
   }
+  function chatIsNearBottom() {
+    const remaining = els.chatLog.scrollHeight - els.chatLog.scrollTop - els.chatLog.clientHeight;
+    return remaining < 48;
+  }
+  function scrollChatToBottom() {
+    els.chatLog.scrollTop = els.chatLog.scrollHeight;
+    els.newMessagesBtn.hidden = true;
+  }
   function renderMessages(messages) {
+    const visibleMessages = messages.slice(-80);
+    const messagesKey = visibleMessages.map(m => `${m.id || ""}:${m.name || ""}:${m.text || ""}`).join("|");
+    if (messagesKey === state.lastMessagesKey) return;
+    const wasNearBottom = chatIsNearBottom();
+    const previousScrollTop = els.chatLog.scrollTop;
+    state.lastMessagesKey = messagesKey;
     els.chatLog.innerHTML = "";
-    messages.slice(-80).forEach(m => {
+    visibleMessages.forEach(m => {
       const isDanmaku = String(m.text || "").startsWith("弹幕：");
       const text = isDanmaku ? String(m.text).replace(/^弹幕：/, "") : String(m.text || "");
       const item = document.createElement("div");
@@ -220,7 +373,12 @@
         if (state.danmakuOn) flyDanmaku(text);
       }
     });
-    els.chatLog.scrollTop = els.chatLog.scrollHeight;
+    if (wasNearBottom) {
+      scrollChatToBottom();
+    } else {
+      els.chatLog.scrollTop = previousScrollTop;
+      els.newMessagesBtn.hidden = false;
+    }
   }
   function renderNotes(notes) {
     els.noteLog.innerHTML = "";
@@ -545,6 +703,10 @@
     $("joinRoomBtn").addEventListener("click", joinRoom);
     $("sendChatBtn").addEventListener("click", () => sendMessage(false));
     $("sendDanmakuBtn").addEventListener("click", () => sendMessage(true));
+    els.newMessagesBtn.addEventListener("click", scrollChatToBottom);
+    els.chatLog.addEventListener("scroll", () => {
+      if (chatIsNearBottom()) els.newMessagesBtn.hidden = true;
+    }, { passive: true });
     $("addNoteBtn").addEventListener("click", addNote);
     $("generateCardBtn").addEventListener("click", generateCard);
     $("syncNowBtn").addEventListener("click", () => syncPlayback(true));
