@@ -78,6 +78,7 @@
             <label class="file-button">导入影片<input id="videoFile" type="file" accept="video/*"></label>
             <label class="file-button">导入字幕<input id="subtitleFile" type="file" accept=".srt,.vtt,.ass,.ssa,text/*"></label>
             <button id="syncNowBtn">同步进度</button>
+            <button id="exportRoomBtn">导出本场 Markdown</button>
             <button id="captureFrameBtn">给 AI 看一眼</button>
             <button id="toggleDanmakuBtn">弹幕 ON</button>
           </div>
@@ -130,7 +131,7 @@
           </section>
 
           <section id="tab-hall" class="tab-page">
-            <p class="status-line">影厅会保存本机导入过的片名和上次进度；浏览器不能永久保存视频文件本体，重新打开后需要再次选择本地文件。</p>
+            <p class="status-line">每个房间会作为独立观影场次存档；聊天、弹幕、笔记、观影卡和进度可导出为 Markdown。浏览器不能永久保存视频文件本体，重新打开后仍需再次选择本地文件。</p>
             <div id="hallList" class="hall-list"></div>
             <button id="clearHallBtn" class="ghost full">清空本机影厅记录</button>
           </section>

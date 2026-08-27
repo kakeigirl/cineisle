@@ -1,4 +1,4 @@
-const CACHE = "cineisle-pwa-v0.4.6-room-recovery";
+const CACHE = "cineisle-pwa-v0.4.7-session-archive";
 const ASSETS = ["/", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png", "/icons/icon-512.png"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));

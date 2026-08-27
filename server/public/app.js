@@ -154,6 +154,8 @@
     if (!room || !room.id) return null;
     return {
       id: roomCode(room.id),
+      sessionId: room.sessionId || "",
+      sessionStartedAt: room.sessionStartedAt || room.createdAt || "",
       createdAt: room.createdAt || "",
       updatedAt: room.updatedAt || nowIso(),
       title: room.title || "未命名影片",
@@ -165,9 +167,10 @@
       partner: room.partner || state.name,
       mood: room.mood || "",
       inviteNote: room.inviteNote || "",
-      messages: Array.isArray(room.messages) ? room.messages.slice(-80) : [],
-      notes: Array.isArray(room.notes) ? room.notes.slice(-80) : [],
-      card: room.card || null
+      messages: Array.isArray(room.messages) ? room.messages : [],
+      notes: Array.isArray(room.notes) ? room.notes : [],
+      card: room.card || null,
+      playbackHistory: Array.isArray(room.playbackHistory) ? room.playbackHistory : []
     };
   }
   function loadRoomCache(id) {
@@ -181,16 +184,14 @@
     if (!snapshot) return;
     try { localStorage.setItem(roomCacheKey(snapshot.id), JSON.stringify(snapshot)); } catch {}
   }
-  function mergeCachedItems(cached, remote, max) {
+  function mergeCachedItems(cached, remote) {
     const items = new Map();
     for (const item of [...(Array.isArray(cached) ? cached : []), ...(Array.isArray(remote) ? remote : [])]) {
-      if (!item || !item.text) continue;
-      const key = String(item.id || `${item.at || ""}|${item.name || ""}|${item.text}`);
+      if (!item || typeof item !== "object") continue;
+      const key = String(item.id || `${item.at || ""}|${item.name || item.actor || ""}|${item.text || item.event || ""}|${item.time ?? item.currentTime ?? ""}`);
       items.set(key, item);
     }
-    return Array.from(items.values())
-      .sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")))
-      .slice(-max);
+    return Array.from(items.values()).sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
   }
   function newerCard(cached, remote) {
     if (!cached) return remote || null;
@@ -217,17 +218,20 @@
       partner: remote.partner && remote.partner !== "观影人 A × 观影人 B" ? remote.partner : (cached.partner || remote.partner),
       mood: remote.mood && remote.mood !== "夜航" ? remote.mood : (cached.mood || remote.mood),
       inviteNote: remote.inviteNote && remote.inviteNote !== "今晚一起登岛看一场电影。" ? remote.inviteNote : (cached.inviteNote || remote.inviteNote),
-      messages: mergeCachedItems(cached.messages, remote.messages, 80),
-      notes: mergeCachedItems(cached.notes, remote.notes, 80),
-      card: newerCard(cached.card, remote.card)
+      messages: mergeCachedItems(cached.messages, remote.messages),
+      notes: mergeCachedItems(cached.notes, remote.notes),
+      card: newerCard(cached.card, remote.card),
+      playbackHistory: mergeCachedItems(cached.playbackHistory, remote.playbackHistory)
     };
   }
   function roomNeedsRestore(remote, merged) {
     if (!remote || !merged) return false;
     const remoteMessageIds = new Set((remote.messages || []).map(x => String(x.id || "")));
     const remoteNoteIds = new Set((remote.notes || []).map(x => String(x.id || "")));
+    const remotePlaybackIds = new Set((remote.playbackHistory || []).map(x => String(x.id || "")));
     return (merged.messages || []).some(x => !remoteMessageIds.has(String(x.id || "")))
       || (merged.notes || []).some(x => !remoteNoteIds.has(String(x.id || "")))
+      || (merged.playbackHistory || []).some(x => !remotePlaybackIds.has(String(x.id || "")))
       || (!remote.card && Boolean(merged.card))
       || ((Date.parse(merged.card?.generatedAt || "") || 0) > (Date.parse(remote.card?.generatedAt || "") || 0))
       || (!Number(remote.duration || 0) && Number(merged.duration || 0) > 0)
@@ -362,11 +366,12 @@
     state.lastMessagesKey = messagesKey;
     els.chatLog.innerHTML = "";
     visibleMessages.forEach(m => {
-      const isDanmaku = String(m.text || "").startsWith("弹幕：");
+      const isDanmaku = m.danmaku === true || String(m.text || "").startsWith("弹幕：");
       const text = isDanmaku ? String(m.text).replace(/^弹幕：/, "") : String(m.text || "");
       const item = document.createElement("div");
       item.className = "log-item";
-      item.innerHTML = `<div class="log-meta">${escapeHtml(m.name || "观影人")} · ${isDanmaku ? "弹幕" : "聊天"}</div><div>${escapeHtml(text)}</div>`;
+      const at = m.at ? new Date(m.at).toLocaleString() : "时间未记录";
+      item.innerHTML = `<div class="log-meta">${escapeHtml(m.name || "观影人")} · ${isDanmaku ? "弹幕" : "聊天"} · ${timeLabel(m.time)} · ${escapeHtml(at)}</div><div>${escapeHtml(text)}</div>`;
       els.chatLog.appendChild(item);
       if (isDanmaku && !state.seenMessages.has(m.id)) {
         state.seenMessages.add(m.id);
@@ -396,6 +401,86 @@
   }
   function escapeHtml(s) {
     return String(s || "").replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[ch]));
+  }
+
+  function markdownInline(value) {
+    return String(value ?? "").replace(/[\r\n]+/g, " ").replace(/([\\`*_{}\[\]<>])/g, "\\$1").trim();
+  }
+  function markdownBlock(value) {
+    const text = String(value ?? "").trim();
+    return text ? text.split(/\r?\n/).map(line => `> ${line}`).join("\n") : "> （无）";
+  }
+  function localRoomMarkdown(room) {
+    const lines = [
+      `# ${markdownInline(room.title || "未命名影片")} · 观影记录`, "",
+      `- 房间：${markdownInline(room.id || state.roomId)}`,
+      `- 场次 ID：${markdownInline(room.sessionId || room.id || state.roomId)}`,
+      `- 开始时间：${markdownInline(room.sessionStartedAt || room.createdAt || "")}`,
+      `- 最后更新：${markdownInline(room.updatedAt || "")}`,
+      `- 影片文件：${markdownInline(room.fileName || "未记录")}`,
+      `- 片长：${timeLabel(room.duration)}`,
+      `- 最后进度：${timeLabel(room.currentTime)}（${room.paused === false ? "播放中" : "已暂停"}）`,
+      `- 观影人：${markdownInline(room.partner || "未记录")}`,
+      `- AI 搭子：${markdownInline(room.assistantName || state.assistantName)}`,
+      `- 氛围：${markdownInline(room.mood || "未记录")}`,
+      "", "## 开场备注", "", markdownBlock(room.inviteNote), "", "## 聊天与弹幕", ""
+    ];
+    const messages = Array.isArray(room.messages) ? room.messages : [];
+    if (!messages.length) lines.push("（无）");
+    messages.forEach(m => {
+      const danmaku = m.danmaku === true || String(m.text || "").startsWith("弹幕：");
+      const text = String(m.text || "").replace(/^弹幕：/, "");
+      lines.push(`- [${timeLabel(m.time)}] [${markdownInline(m.at)}] **${markdownInline(m.name || "观影人")} · ${danmaku ? "弹幕" : "聊天"}**：${markdownInline(text)}`);
+    });
+    lines.push("", "## 笔记", "");
+    const notes = Array.isArray(room.notes) ? room.notes : [];
+    if (!notes.length) lines.push("（无）");
+    notes.forEach(n => lines.push(`- [${timeLabel(n.time)}] [${markdownInline(n.at)}] **${markdownInline(n.name || "观影人")}**：${markdownInline(n.text)}`));
+    lines.push("", "## 播放记录", "");
+    const playback = Array.isArray(room.playbackHistory) ? room.playbackHistory : [];
+    if (!playback.length) lines.push(`- [${timeLabel(room.currentTime)}] [${markdownInline(room.updatedAt)}] ${room.paused === false ? "播放" : "暂停"} · ${markdownInline(room.lastActor || "观影人")}`);
+    playback.forEach(item => lines.push(`- [${timeLabel(item.currentTime)}] [${markdownInline(item.at)}] ${markdownInline(item.event)} · ${markdownInline(item.actor)} · ${item.paused === false ? "播放中" : "已暂停"}`));
+    lines.push("", "## 观影卡", "");
+    const c = room.card;
+    if (!c) lines.push("（无）");
+    else lines.push(
+      `- 标题：${markdownInline(c.title)}`,
+      `- 模板：${markdownInline(c.template)}`,
+      `- 评分：${markdownInline(c.rating)}`,
+      `- 生成时间：${markdownInline(c.generatedAt)}`,
+      "", "### 摘录", "", markdownBlock(c.quote || c.zhiQuote || c.linQuote),
+      "", "### 观后感", "", markdownBlock(c.note || c.zhiNote || c.linNote)
+    );
+    return `${lines.join("\n")}\n`;
+  }
+  function downloadMarkdown(markdown, filename) {
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function exportRoomMarkdown() {
+    if (!state.roomId) return setStatus("先创建或加入房间。");
+    const cached = loadRoomCache(state.roomId);
+    try {
+      const res = await fetch(apiPath(`/api/rooms/${state.roomId}/export.md`), { method:"GET", headers:headers(false) });
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+      const disposition = res.headers.get("content-disposition") || "";
+      const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const filename = encoded ? decodeURIComponent(encoded) : `cineisle-${state.roomId}.md`;
+      downloadMarkdown(await res.text(), filename);
+      setStatus(`房间 ${state.roomId} 的完整场次记录已导出。`);
+    } catch (error) {
+      const room = cached || state.room;
+      if (!room) return setStatus(`导出失败：${error.message}`);
+      downloadMarkdown(localRoomMarkdown(room), `cineisle-${state.roomId}-local.md`);
+      setStatus(`服务器导出不可用，已从本机缓存导出房间 ${state.roomId}。`);
+    }
   }
 
   async function sendMessage(danmaku) {
@@ -710,6 +795,7 @@
     $("addNoteBtn").addEventListener("click", addNote);
     $("generateCardBtn").addEventListener("click", generateCard);
     $("syncNowBtn").addEventListener("click", () => syncPlayback(true));
+    $("exportRoomBtn").addEventListener("click", exportRoomMarkdown);
     $("captureFrameBtn").addEventListener("click", captureFrame);
     $("toggleDanmakuBtn").addEventListener("click", () => {
       state.danmakuOn = !state.danmakuOn;
