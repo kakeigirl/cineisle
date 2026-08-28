@@ -24,16 +24,26 @@
     lastTimeupdateLogAt: 0,
     lastRangeCheckUrl: "",
     lastMessagesKey: "",
-    restorePromise: null
+    restorePromise: null,
+    theaterMode: false,
+    sideCollapsed: false,
+    sidebarWidth: 360,
+    renderedMessageIds: new Set(),
+    hasRenderedMessages: false,
+    chatUnread: 0,
+    chatPeekTimer: null
   };
 
   const els = {
     serverUrl: $("serverUrl"), token: $("token"), viewerName: $("viewerName"), assistantName: $("assistantName"),
     joinRoomInput: $("joinRoomInput"), statusLine: $("statusLine"), healthState: $("healthState"), roomTitle: $("roomTitle"), roomBadge: $("roomBadge"),
-    video: $("video"), videoFile: $("videoFile"), subtitleFile: $("subtitleFile"), subtitleOverlay: $("subtitleOverlay"), danmakuLayer: $("danmakuLayer"),
+    video: $("video"), videoWrap: $("videoWrap"), videoFile: $("videoFile"), subtitleFile: $("subtitleFile"), subtitleOverlay: $("subtitleOverlay"), danmakuLayer: $("danmakuLayer"),
     playerState: $("playerState"), chatLog: $("chatLog"), chatInput: $("chatInput"), newMessagesBtn: $("newMessagesBtn"), noteLog: $("noteLog"), noteInput: $("noteInput"),
     quoteInput: $("quoteInput"), cardNoteInput: $("cardNoteInput"), cardTemplate: $("cardTemplate"), cardPreview: $("cardPreview"),
-    contextState: $("contextState"), hallList: $("hallList"), installDialog: $("installDialog")
+    contextState: $("contextState"), hallList: $("hallList"), installDialog: $("installDialog"),
+    layout: document.querySelector(".layout"), sidePanel: document.querySelector(".side-panel"),
+    theaterModeBtn: $("theaterModeBtn"), layoutResizer: $("layoutResizer"), collapseSideBtn: $("collapseSideBtn"),
+    chatRailBtn: $("chatRailBtn"), chatRailLabel: $("chatRailLabel"), railUnreadBadge: $("railUnreadBadge"), chatPeek: $("chatPeek")
   };
 
   function cleanUrl(v) { return String(v || "").trim().replace(/\/+$/, ""); }
@@ -129,7 +139,104 @@
     localStorage.setItem("cineisle.settings", JSON.stringify({
       serverUrl: state.serverUrl, token: state.token, name: state.name, assistantName: state.assistantName, roomId: state.roomId
     }));
+    applyLayoutSettings();
     setStatus("设置已保存。");
+  }
+  function saveLayoutSettings() {
+    try {
+      localStorage.setItem("cineisle.layout", JSON.stringify({
+        theaterMode: state.theaterMode,
+        sideCollapsed: state.sideCollapsed,
+        sidebarWidth: state.sidebarWidth
+      }));
+    } catch {}
+  }
+  function loadLayoutSettings() {
+    let layout = {};
+    try { layout = JSON.parse(localStorage.getItem("cineisle.layout") || "{}"); } catch {}
+    state.theaterMode = layout.theaterMode === true;
+    state.sideCollapsed = layout.sideCollapsed === true;
+    const width = Number(layout.sidebarWidth);
+    state.sidebarWidth = Number.isFinite(width) ? Math.min(520, Math.max(300, width)) : 360;
+    applyLayoutSettings();
+  }
+  function applyLayoutSettings() {
+    document.body.classList.toggle("theater-mode", state.theaterMode);
+    document.body.classList.toggle("side-collapsed", state.theaterMode && state.sideCollapsed);
+    els.layout.style.setProperty("--sidebar-width", `${state.sidebarWidth}px`);
+    els.theaterModeBtn.textContent = state.theaterMode ? "退出影院" : "影院模式";
+    els.theaterModeBtn.setAttribute("aria-pressed", String(state.theaterMode));
+    els.collapseSideBtn.setAttribute("aria-expanded", String(!state.sideCollapsed));
+    els.chatRailLabel.textContent = `${state.assistantName || "澈"}在这里`;
+  }
+  function toggleTheaterMode() {
+    state.theaterMode = !state.theaterMode;
+    applyLayoutSettings();
+    saveLayoutSettings();
+  }
+  function setSideCollapsed(collapsed) {
+    state.sideCollapsed = Boolean(collapsed);
+    applyLayoutSettings();
+    saveLayoutSettings();
+    if (!state.sideCollapsed) {
+      window.setTimeout(() => els.chatInput.focus(), 80);
+    }
+  }
+  function updateUnreadUi() {
+    const count = Math.max(0, state.chatUnread);
+    els.railUnreadBadge.textContent = count > 99 ? "99+" : String(count);
+    els.railUnreadBadge.hidden = count === 0;
+    if (!chatIsNearBottom()) {
+      els.newMessagesBtn.textContent = count ? `有 ${count} 条新消息 ↓` : "回到最新消息 ↓";
+      els.newMessagesBtn.hidden = false;
+    } else {
+      els.newMessagesBtn.hidden = true;
+    }
+  }
+  function showChatPeek(message) {
+    if (!state.theaterMode || !state.sideCollapsed || !message) return;
+    const isDanmaku = message.danmaku === true || String(message.text || "").startsWith("弹幕：");
+    const text = String(message.text || "").replace(/^弹幕：/, "");
+    els.chatPeek.replaceChildren();
+    const name = document.createElement("span");
+    name.className = "chat-peek-name";
+    name.textContent = `${message.name || "观影人"}${isDanmaku ? " · 弹幕" : ""}`;
+    const body = document.createElement("span");
+    body.textContent = text.slice(0, 120);
+    els.chatPeek.append(name, body);
+    els.chatPeek.hidden = false;
+    if (state.chatPeekTimer) clearTimeout(state.chatPeekTimer);
+    state.chatPeekTimer = setTimeout(() => { els.chatPeek.hidden = true; }, 6500);
+  }
+  function bindLayoutResizer() {
+    const clampWidth = value => Math.min(520, Math.max(300, Number(value) || 360));
+    const setWidth = value => {
+      state.sidebarWidth = clampWidth(value);
+      els.layout.style.setProperty("--sidebar-width", `${state.sidebarWidth}px`);
+    };
+    els.layoutResizer.addEventListener("pointerdown", event => {
+      if (window.matchMedia("(max-width: 860px)").matches || state.sideCollapsed) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = els.sidePanel.getBoundingClientRect().width;
+      document.body.classList.add("resizing-layout");
+      els.layoutResizer.setPointerCapture?.(event.pointerId);
+      const move = moveEvent => setWidth(startWidth + startX - moveEvent.clientX);
+      const end = () => {
+        document.body.classList.remove("resizing-layout");
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", end);
+        saveLayoutSettings();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", end, { once: true });
+    });
+    els.layoutResizer.addEventListener("keydown", event => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      setWidth(state.sidebarWidth + (event.key === "ArrowLeft" ? 20 : -20));
+      saveLayoutSettings();
+    });
   }
   function loadSettings() {
     let s = {};
@@ -146,6 +253,7 @@
     els.joinRoomInput.value = state.roomId;
     try { state.hall = JSON.parse(localStorage.getItem("cineisle.hall") || "[]"); } catch { state.hall = []; }
     renderHall();
+    applyLayoutSettings();
   }
   function roomCacheKey(id) {
     return `cineisle.room.${roomCode(id)}`;
@@ -355,7 +463,9 @@
   }
   function scrollChatToBottom() {
     els.chatLog.scrollTop = els.chatLog.scrollHeight;
+    state.chatUnread = 0;
     els.newMessagesBtn.hidden = true;
+    updateUnreadUi();
   }
   function renderMessages(messages) {
     const visibleMessages = messages.slice(-80);
@@ -363,6 +473,10 @@
     if (messagesKey === state.lastMessagesKey) return;
     const wasNearBottom = chatIsNearBottom();
     const previousScrollTop = els.chatLog.scrollTop;
+    const firstRender = !state.hasRenderedMessages;
+    const incoming = !firstRender
+      ? visibleMessages.filter(m => !state.renderedMessageIds.has(String(m.id || `${m.at || ""}|${m.name || ""}|${m.text || ""}`)))
+      : [];
     state.lastMessagesKey = messagesKey;
     els.chatLog.innerHTML = "";
     visibleMessages.forEach(m => {
@@ -370,6 +484,7 @@
       const text = isDanmaku ? String(m.text).replace(/^弹幕：/, "") : String(m.text || "");
       const item = document.createElement("div");
       item.className = "log-item";
+      item.dataset.messageId = String(m.id || "");
       const at = m.at ? new Date(m.at).toLocaleString() : "时间未记录";
       item.innerHTML = `<div class="log-meta">${escapeHtml(m.name || "观影人")} · ${isDanmaku ? "弹幕" : "聊天"} · ${timeLabel(m.time)} · ${escapeHtml(at)}</div><div>${escapeHtml(text)}</div>`;
       els.chatLog.appendChild(item);
@@ -378,11 +493,17 @@
         if (state.danmakuOn) flyDanmaku(text);
       }
     });
-    if (wasNearBottom) {
+    state.renderedMessageIds = new Set(visibleMessages.map(m => String(m.id || `${m.at || ""}|${m.name || ""}|${m.text || ""}`)));
+    state.hasRenderedMessages = true;
+    const shouldHoldPosition = !firstRender && (!wasNearBottom || (state.theaterMode && state.sideCollapsed));
+    if (!shouldHoldPosition) {
       scrollChatToBottom();
     } else {
       els.chatLog.scrollTop = previousScrollTop;
-      els.newMessagesBtn.hidden = false;
+      state.chatUnread += incoming.length;
+      updateUnreadUi();
+      const latestIncoming = [...incoming].reverse().find(m => String(m.name || "") !== state.name) || incoming[incoming.length - 1];
+      if (latestIncoming) showChatPeek(latestIncoming);
     }
   }
   function renderNotes(notes) {
@@ -790,8 +911,22 @@
     $("sendDanmakuBtn").addEventListener("click", () => sendMessage(true));
     els.newMessagesBtn.addEventListener("click", scrollChatToBottom);
     els.chatLog.addEventListener("scroll", () => {
-      if (chatIsNearBottom()) els.newMessagesBtn.hidden = true;
+      if (chatIsNearBottom()) {
+        state.chatUnread = 0;
+        updateUnreadUi();
+      }
     }, { passive: true });
+    els.theaterModeBtn.addEventListener("click", toggleTheaterMode);
+    els.collapseSideBtn.addEventListener("click", () => setSideCollapsed(true));
+    els.chatRailBtn.addEventListener("click", () => {
+      setSideCollapsed(false);
+      scrollChatToBottom();
+    });
+    els.chatPeek.addEventListener("click", () => {
+      els.chatPeek.hidden = true;
+      setSideCollapsed(false);
+      scrollChatToBottom();
+    });
     $("addNoteBtn").addEventListener("click", addNote);
     $("generateCardBtn").addEventListener("click", generateCard);
     $("syncNowBtn").addEventListener("click", () => syncPlayback(true));
@@ -816,7 +951,18 @@
     $("clearHallBtn").addEventListener("click", () => { state.hall = []; localStorage.removeItem("cineisle.hall"); renderHall(); });
     $("installTipBtn").addEventListener("click", () => els.installDialog.showModal());
     $("closeInstallDialog").addEventListener("click", () => els.installDialog.close());
-    els.chatInput.addEventListener("keydown", e => { if (e.key === "Enter") sendMessage(false); });
+    els.chatInput.addEventListener("keydown", e => {
+      if (e.key === "Enter" && !e.isComposing && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage(false);
+      }
+    });
+    document.addEventListener("keydown", e => {
+      if (e.key !== "Escape" || !state.theaterMode) return;
+      if (state.sideCollapsed) setSideCollapsed(false);
+      else toggleTheaterMode();
+    });
+    bindLayoutResizer();
   }
 
   if ("serviceWorker" in navigator) {
@@ -825,5 +971,6 @@
   bindTabs();
   bindEvents();
   loadSettings();
+  loadLayoutSettings();
   if (state.roomId) enterRoom(state.roomId, null);
 })();

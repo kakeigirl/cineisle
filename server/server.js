@@ -6,7 +6,7 @@ const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 8787;
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
-const APP_VERSION = "0.4.7-session-archive";
+const APP_VERSION = "0.5.0-mingche-theater";
 const DATA_DIR = path.resolve(process.env.CINEISLE_DATA_DIR || path.join(__dirname, "data"));
 
 app.use(cors());

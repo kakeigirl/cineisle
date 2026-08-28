@@ -65,13 +65,17 @@
               <p class="eyebrow">播放</p>
               <h2 id="roomTitle">未进入房间</h2>
             </div>
-            <span id="roomBadge" class="pill strong">ROOM ----</span>
+            <div class="player-heading-actions">
+              <span id="roomBadge" class="pill strong">ROOM ----</span>
+              <button id="theaterModeBtn" class="ghost compact" type="button" aria-pressed="false">影院模式</button>
+            </div>
           </div>
 
           <div class="video-wrap" id="videoWrap">
             <video id="video" controls playsinline webkit-playsinline></video>
             <div id="subtitleOverlay" class="subtitle-overlay"></div>
             <div id="danmakuLayer" class="danmaku-layer"></div>
+            <button id="chatPeek" class="chat-peek" type="button" hidden></button>
           </div>
 
           <div class="button-row wrap">
@@ -85,56 +89,68 @@
           <p id="playerState" class="status-line">请先创建或加入房间，再导入本地影片。iOS Safari 出于隐私限制，重新打开后需要重新选择影片。</p>
         </section>
 
+        <div id="layoutResizer" class="layout-resizer" role="separator" aria-label="调整影片和聊天的宽度" aria-orientation="vertical" tabindex="0"></div>
+
         <aside class="panel side-panel">
-          <nav class="tabs" aria-label="映屿功能切换">
-            <button class="tab active" data-tab="chat">聊天</button>
-            <button class="tab" data-tab="notes">笔记</button>
-            <button class="tab" data-tab="card">卡片</button>
-            <button class="tab" data-tab="hall">影厅</button>
-          </nav>
+          <button id="chatRailBtn" class="chat-rail" type="button" aria-label="展开聊天">
+            <span id="chatRailLabel">澈在这里</span>
+            <span id="railUnreadBadge" class="rail-unread" hidden>0</span>
+          </button>
 
-          <section id="tab-chat" class="tab-page active">
-            <div class="chat-log-wrap">
-              <div id="chatLog" class="log"></div>
-              <button id="newMessagesBtn" class="new-messages-btn" type="button" hidden>有新消息 ↓</button>
+          <div class="side-content">
+            <div class="side-toolbar">
+              <nav class="tabs" aria-label="映屿功能切换">
+                <button class="tab active" data-tab="chat">聊天</button>
+                <button class="tab" data-tab="notes">笔记</button>
+                <button class="tab" data-tab="card">卡片</button>
+                <button class="tab" data-tab="hall">影厅</button>
+              </nav>
+              <button id="collapseSideBtn" class="collapse-side-btn ghost" type="button" aria-label="收起聊天栏" title="收起聊天栏">收起</button>
             </div>
-            <div class="composer">
-              <input id="chatInput" placeholder="发聊天 / 弹幕">
-              <button id="sendChatBtn">聊天</button>
-              <button id="sendDanmakuBtn" class="primary">弹幕</button>
-            </div>
-          </section>
 
-          <section id="tab-notes" class="tab-page">
-            <div id="noteLog" class="log"></div>
-            <div class="composer">
-              <input id="noteInput" placeholder="记录当前时间点的观影笔记">
-              <button id="addNoteBtn" class="primary">记一笔</button>
-            </div>
-            <p id="contextState" class="status-line">字幕上下文会随播放进度同步。</p>
-          </section>
+            <section id="tab-chat" class="tab-page active">
+              <div class="chat-log-wrap">
+                <div id="chatLog" class="log"></div>
+                <button id="newMessagesBtn" class="new-messages-btn" type="button" hidden>有新消息 ↓</button>
+              </div>
+              <div class="composer">
+                <input id="chatInput" placeholder="发聊天 / 弹幕">
+                <button id="sendChatBtn">聊天</button>
+                <button id="sendDanmakuBtn" class="primary">弹幕</button>
+              </div>
+            </section>
 
-          <section id="tab-card" class="tab-page">
-            <div class="grid one">
-              <label>卡片摘录<input id="quoteInput" placeholder="喜欢的一句台词"></label>
-              <label>观后感<textarea id="cardNoteInput" placeholder="今晚想留下的话"></textarea></label>
-              <label>模板
-                <select id="cardTemplate">
-                  <option value="ticket">电影票根</option>
-                  <option value="receipt">片尾回执</option>
-                  <option value="postcard">观影明信片</option>
-                </select>
-              </label>
-            </div>
-            <button id="generateCardBtn" class="primary full">生成/更新卡片</button>
-            <div id="cardPreview" class="card-preview">还没有卡片。</div>
-          </section>
+            <section id="tab-notes" class="tab-page">
+              <div id="noteLog" class="log"></div>
+              <div class="composer">
+                <input id="noteInput" placeholder="记录当前时间点的观影笔记">
+                <button id="addNoteBtn" class="primary">记一笔</button>
+              </div>
+              <p id="contextState" class="status-line">字幕上下文会随播放进度同步。</p>
+            </section>
 
-          <section id="tab-hall" class="tab-page">
-            <p class="status-line">每个房间会作为独立观影场次存档；聊天、弹幕、笔记、观影卡和进度可导出为 Markdown。浏览器不能永久保存视频文件本体，重新打开后仍需再次选择本地文件。</p>
-            <div id="hallList" class="hall-list"></div>
-            <button id="clearHallBtn" class="ghost full">清空本机影厅记录</button>
-          </section>
+            <section id="tab-card" class="tab-page">
+              <div class="grid one">
+                <label>卡片摘录<input id="quoteInput" placeholder="喜欢的一句台词"></label>
+                <label>观后感<textarea id="cardNoteInput" placeholder="今晚想留下的话"></textarea></label>
+                <label>模板
+                  <select id="cardTemplate">
+                    <option value="ticket">电影票根</option>
+                    <option value="receipt">片尾回执</option>
+                    <option value="postcard">观影明信片</option>
+                  </select>
+                </label>
+              </div>
+              <button id="generateCardBtn" class="primary full">生成/更新卡片</button>
+              <div id="cardPreview" class="card-preview">还没有卡片。</div>
+            </section>
+
+            <section id="tab-hall" class="tab-page">
+              <p class="status-line">每个房间会作为独立观影场次存档；聊天、弹幕、笔记、观影卡和进度可导出为 Markdown。浏览器不能永久保存视频文件本体，重新打开后仍需再次选择本地文件。</p>
+              <div id="hallList" class="hall-list"></div>
+              <button id="clearHallBtn" class="ghost full">清空本机影厅记录</button>
+            </section>
+          </div>
         </aside>
       </section>
     </main>

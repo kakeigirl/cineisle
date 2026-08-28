@@ -1,4 +1,4 @@
-const CACHE = "cineisle-pwa-v0.4.7-session-archive";
+const CACHE = "cineisle-pwa-v0.5.0-mingche-theater";
 const ASSETS = ["/", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png", "/icons/icon-512.png"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -9,9 +9,9 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.pathname.startsWith("/api/") || url.pathname.startsWith("/mcp")) return;
-  event.respondWith(caches.match(event.request).then(cached => cached || fetch(event.request).then(res => {
+  event.respondWith(fetch(event.request).then(res => {
     const copy = res.clone();
     caches.open(CACHE).then(cache => cache.put(event.request, copy)).catch(() => {});
     return res;
-  }).catch(() => caches.match("/"))));
+  }).catch(async () => (await caches.match(event.request)) || caches.match("/")));
 });
